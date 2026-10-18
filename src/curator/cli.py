@@ -174,6 +174,20 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    try:
+        from .web.app import create_app
+    except ImportError as exc:
+        print(f"\nWeb UI needs optional deps: pip install -e '.[web]'\n  {exc}",
+              file=sys.stderr)
+        return 2
+    app = create_app(db_path=args.db, use_fixtures=args.fixtures)
+    print(f"Starting local review UI on http://127.0.0.1:{args.port}", file=sys.stderr)
+    print(f"  db: {args.db}  ·  fixtures: {args.fixtures}", file=sys.stderr)
+    app.run(host="127.0.0.1", port=args.port, debug=args.debug, use_reloader=args.debug)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="curator", description="Local photo cataloguer (read-only).")
     p.add_argument("--db", default="curator.db", help="SQLite file (default: curator.db)")
@@ -215,6 +229,12 @@ def main(argv=None) -> int:
     b = sub.add_parser("benchmark", help="evaluate scorers on your labeled groups")
     b.add_argument("--model", default=None, help="adds emb_centroid when set")
     b.set_defaults(fn=cmd_benchmark)
+
+    w = sub.add_parser("web", help="start the local review UI")
+    w.add_argument("--port", type=int, default=5001)
+    w.add_argument("--debug", action="store_true")
+    w.add_argument("--fixtures", action="store_true", help="use fake data (Sprint 1)")
+    w.set_defaults(fn=cmd_web)
 
     st = sub.add_parser("stats", help="summary of the database")
     st.add_argument("--errors", action="store_true")

@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+
+{% block body %}
+<script id="initial-data" type="application/json">
+{
+    "groups": {{ groups | tojson }},
+    "pendingCount": {{ pending_count }},
+    "useFixtures": {{ use_fixtures | tojson }}
+}
+</script>
+
+<div x-data="curatorApp()" @keydown.window="onKey($event)" class="app">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar" aria-label="Groups">
+        <header class="sidebar__header">
+            <div class="sidebar__label">Groups</div>
+            <div x-show="pendingCount > 0" class="sidebar__counter">
+                <span class="sidebar__counter-value" x-text="pendingCount"></span>
+                <span class="sidebar__counter-label">to review</span>
+            </div>
+            <div x-show="pendingCount === 0" class="sidebar__counter">
+                <span class="sidebar__counter-value sidebar__counter-value--done">✓</span>
+                <span class="sidebar__counter-label">all done</span>
+            </div>
+            <div class="ring" role="progressbar" :aria-valuenow="ringPercent" aria-valuemin="0" aria-valuemax="100">
+                <svg viewBox="0 0 40 40" width="40" height="40">
+                    <circle class="ring__track" cx="20" cy="20" r="16"></circle>
+                    <circle class="ring__fill" cx="20" cy="20" r="16"
+                            :stroke-dasharray="100.53"
+                            :stroke-dashoffset="ringOffset"></circle>
+                </svg>
+                <span class="ring__value" x-text="ringPercent + '%'"></span>
+            </div>
+        </header>
+
+        <nav class="sidebar__list">
+            <template x-for="group in groups" :key="group.id">
+                <button
+                    type="button"
+                    class="group-row"
+                    :class="{
+                        'group-row--selected':  selectedId === group.id,
+                        'group-row--completed': group.status === 'completed',
+                        'group-row--deleted':   group.status === 'deleted',
+                    }"
+                    :x-ref="'group-' + group.id"
+                    @click="select(group.id)"
+                    :aria-current="selectedId === group.id ? 'true' : null"
+                >
+                    <span class="group-row__thumb-wrap">
+                        <img class="group-row__thumb" :src="winnerThumb(group)" alt="" loading="lazy">
+                        <span class="group-row__dot" aria-hidden="true"></span>
+                    </span>
+                    <span class="group-row__body">
+                        <span class="group-row__title" x-text="'Group ' + group.id"></span>
+                        <span class="group-row__meta" x-text="formatDate(group.taken_at)"></span>
+                    </span>
+                    <span class="group-row__count" x-text="group.photos.length"></span>
+                </button>
+            </template>
+        </nav>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+        <template x-if="!selectedGroup">
+            <div class="empty-state">
+                <div class="empty-state__icon" aria-hidden="true">○</div>
+                <div class="empty-state__title">No group selected</div>
+                <div class="empty-state__hint">Pick a group from the sidebar to start reviewing.</div>
+            </div>
+        </template>
+
+        <template x-if="selectedGroup && selectedGroup.status === 'deleted'">
+            <div class="empty-state">
+                <div class="empty-state__icon" aria-hidden="true">⌫</div>
+                <div class="empty-state__title" x-text="'Group ' + selectedGroup.id + ' deleted'"></div>
+                <div class="empty-state__hint">Photos are still on disk. Restore to review them again.</div>
+                <button type="button" class="btn btn--ghost" @click="restoreGroup()">Restore group</button>
+            </div>
+        </template>
+
+        <template x-if="selectedGroup && selectedGroup.status !== 'deleted'">
+            <div class="main__inner">
+                <header class="main__header">
+                    <div>
+                        <div class="main__label">Rejected</div>
+                        <div class="main__title" x-text="'Group ' + selectedGroup.id"></div>
+                    </div>
+                    <div class="main__meta" x-text="rejectedPhotos.length + (rejectedPhotos.length === 1 ? ' photo' : ' photos') + ' · click to promote'"></div>
+                </header>
+
+                <template x-if="rejectedPhotos.length === 0">
+                    <div class="empty-state empty-state--sm">
+                        <div class="empty-state__hint">No rejected photos in this group.</div>
+                    </div>
+                </template>
+
+                <div class="grid" x-show="rejectedPhotos.length > 0">
+                    <template x-for="(photo, idx) in rejectedPhotos" :key="photo.id">
+                        <button
+                            type="button"
+                            class="thumb"
+                            @click="promotePhoto(photo.id)"
+                            @dblclick.stop="openLightbox(photo.id)"
+                            :title="'Promote (press ' + (idx + 1) + ')'"
+                        >
+                            <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy">
+                            <img class="detail__img"
+                            :src="w.url"
+                            @click="openLightbox(w.id)"
+                            style="cursor: zoom-in;"
+                            alt="">
+                            <span class="thumb__index" x-text="idx + 1"></span>
+                            <span class="thumb__meta" aria-hidden="true">
+                                <span>Sharpness <strong x-text="Math.round(photo.sharpness)"></strong></span>
+                                <span>Exposure <strong x-text="Math.round(photo.exposure * 100) + '%'"></strong></span>
+                            </span>
+                        </button>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <template x-if="selectedGroup && pendingCount === 0">
+            <div class="impact">
+                <div class="impact__title">All groups reviewed</div>
+                <dl class="impact__grid">
+                    <div><dt>Kept</dt><dd x-text="groups.filter(g => g.status === 'completed').length"></dd></div>
+                    <div><dt>Deleted</dt><dd x-text="groups.filter(g => g.status === 'deleted').length"></dd></div>
+                    <div><dt>Total groups</dt><dd x-text="groups.length"></dd></div>
+                </dl>
+                <p class="impact__note">
+                    Rejected photos are still on disk. Nothing has been moved yet.
+                </p>
+            </div>
+        </template>
+    </main>
+
+    <!-- DETAIL -->
+    <aside class="detail" aria-label="Chosen photo">
+        <template x-if="selectedGroup && selectedGroup.status !== 'deleted' && currentWinner">
+            <div class="detail__inner">
+                <header class="detail__header">
+                    <div class="detail__label">Chosen</div>
+                </header>
+
+                <div class="detail__preview">
+                    <template x-for="w in [currentWinner]" :key="w.id">
+                        <img class="detail__img" :src="w.url" alt="">
+                    </template>
+                </div>
+
+                <dl class="detail__meta">
+                    <div class="detail__meta-row">
+                        <dt>Sharpness</dt>
+                        <dd x-text="currentWinner.sharpness.toFixed(1)"></dd>
+                    </div>
+                    <div class="detail__meta-row">
+                        <dt>Exposure</dt>
+                        <dd x-text="Math.round(currentWinner.exposure * 100) + '%'"></dd>
+                    </div>
+                    <div class="detail__meta-row">
+                        <dt>ID</dt>
+                        <dd class="detail__meta-mono" x-text="currentWinner.id"></dd>
+                    </div>
+                </dl>
+
+                <footer class="detail__footer">
+                    <button
+                        type="button"
+                        class="btn btn--primary"
+                        @click="confirmGroup()"
+                        :disabled="selectedGroup.status === 'completed'"
+                    >
+                        <span x-text="selectedGroup.status === 'completed' ? 'Confirmed' : 'Confirm as best'"></span>
+                        <kbd x-show="selectedGroup.status !== 'completed'">⏎</kbd>
+                    </button>
+                    <button type="button" class="btn btn--danger" @click="deleteGroup()">
+                        <span>Delete group</span>
+                        <kbd>⌫</kbd>
+                    </button>
+                </footer>
+            </div>
+        </template>
+    </aside>
+
+    <!-- TOASTS -->
+    <div class="toasts" x-ref="toasts" aria-live="polite"></div>
+
+    <!-- SHORTCUTS OVERLAY -->
+    <template x-if="showShortcuts">
+        <div class="overlay" @click.self="showShortcuts = false">
+            <div class="overlay__panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+                <header class="overlay__header">
+                    <div class="overlay__title" id="shortcuts-title">Keyboard shortcuts</div>
+                    <button type="button" class="overlay__close" @click="showShortcuts = false" aria-label="Close">Esc</button>
+                </header>
+                <div class="shortcuts">
+                    <div class="shortcuts__group">
+                        <div class="shortcuts__group-title">Navigate</div>
+                        <div class="shortcut"><span>Next group</span><kbd>J</kbd></div>
+                        <div class="shortcut"><span>Previous group</span><kbd>K</kbd></div>
+                    </div>
+                    <div class="shortcuts__group">
+                        <div class="shortcuts__group-title">Decide</div>
+                        <div class="shortcut"><span>Confirm as best</span><kbd>Enter</kbd></div>
+                        <div class="shortcut"><span>Promote photo</span><kbd>1</kbd><kbd>…</kbd><kbd>9</kbd></div>
+                        <div class="shortcut"><span>Delete group</span><kbd>⌫</kbd></div>
+                    </div>
+                    <div class="shortcuts__group">
+                        <div class="shortcuts__group-title">Other</div>
+                        <div class="shortcut"><span>Undo last action</span><kbd>⌘</kbd><kbd>Z</kbd></div>
+                        <div class="shortcut"><span>This overlay</span><kbd>?</kbd></div>
+                        <div class="shortcut"><span>Deselect group</span><kbd>Esc</kbd></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- LIGHTBOX -->
+    <div x-data="lightbox()"
+        @open-lightbox.window="show($event.detail.photos, $event.detail.index)"
+        x-show="open"
+        x-transition.opacity.duration.150ms
+        class="lightbox"
+        @keydown.escape.window="close()"
+        @keydown.arrow-right.window="next()"
+        @keydown.arrow-left.window="prev()"
+        @keydown.z.window="zoom = !zoom"
+        style="display: none;">
+        <div class="lightbox__stage" @click="toggleZoom($event)">
+            <img :src="current?.url"
+                :style="`transform: ${transform}`"
+                class="lightbox__img"
+                :class="zoom && 'lightbox__img--zoomed'"
+                alt="">
+        </div>
+        <div class="lightbox__chrome">
+            <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
+            <span class="lightbox__hint">
+                <kbd>Z</kbd> zoom · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>Esc</kbd> close
+            </span>
+            <button type="button" class="lightbox__close" @click="close()">Close</button>
+        </div>
+    </div>
+
+    <!-- HINT BAR -->
+    <template x-if="showHintBar">
+        <div class="hintbar">
+            <span>Press <kbd>?</kbd> for shortcuts</span>
+            <button type="button" class="hintbar__close" @click="dismissHint()" aria-label="Dismiss">×</button>
+        </div>
+    </template>
+
+    {% if use_fixtures %}
+    <div class="badge-fixtures">Fixtures · sample data</div>
+    {% endif %}
+
+    <div x-data="lightbox()"
+        x-show="open"
+        x-transition.opacity.duration.150ms
+        class="lightbox"
+        @keydown.escape.window="close()"
+        @keydown.arrow-right.window="next()"
+        @keydown.arrow-left.window="prev()"
+        @keydown.z.window="zoom = !zoom">
+        <div class="lightbox__backdrop" @click="close()"></div>
+        <div class="lightbox__stage" @click="toggleZoom($event)">
+            <img :src="current?.url"
+                :style="`transform: ${transform}`"
+                class="lightbox__img"
+                alt="">
+        </div>
+        <div class="lightbox__chrome">
+            <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
+            <span class="lightbox__hint">
+                <kbd>Z</kbd> zoom · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>Esc</kbd> close
+            </span>
+        </div>
+    </div>
+</div>
+{% endblock %}

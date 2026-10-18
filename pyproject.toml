@@ -1,6 +1,6 @@
 [project]
 name = "photo-curator"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local photo cataloguer: indexes, groups and (later) picks the best shots. Never modifies your files."
 requires-python = ">=3.9"
 dependencies = [
@@ -11,11 +11,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
-embeddings = [
-    "torch>=2.2",
-    "transformers>=4.40",
-]
+dev = ["pytest>=8.0", "flask>=3.0"]
+embeddings = ["torch>=2.2", "transformers>=4.40"]
+web = ["flask>=3.0"]
 
 [project.scripts]
 curator = "curator.cli:main"
@@ -26,3 +24,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"curator.web" = ["templates/*.html", "static/*.js", "static/*.css"]

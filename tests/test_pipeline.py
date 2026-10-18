@@ -327,3 +327,83 @@ def test_scorer_benchmark_counts_misses(tmp_path):
 
     res = benchmark.run_scorer_benchmark(conn, {"sharpness": benchmark.scorer_sharpness})
     assert res["sharpness"] == {"hits": 0, "total": 1, "accuracy": 0.0}
+
+
+# ---- Step 3 (Sprint 1): web UI skeleton --------------------------------------------------
+
+def test_web_app_serves_index_with_fixtures():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    client = app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Groups" in body          # era "Gruppi" — l'UI è ora in inglese
+    assert "Fixtures" in body
+
+
+def test_web_api_endpoints_return_ok():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    client = app.test_client()
+    r = client.post("/api/groups/1/choose", json={"photo_id": "g1b"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    r = client.post("/api/groups/1/confirm")
+    assert r.status_code == 200 and r.get_json()["status"] == "completed"
+    r = client.post("/api/groups/1/delete")
+    assert r.status_code == 200 and r.get_json()["status"] == "deleted"
+
+
+# ---- Step 3 (Sprint 2 refinements) --------------------------------------------------------
+
+def test_progress_estimator_warms_up_then_estimates():
+    from curator.web.progress import ProgressEstimator
+    import time
+
+    est = ProgressEstimator(total=1000, min_samples=20)
+
+    # 19 updates: not enough samples yet → still calibrating
+    for i in range(19):
+        snap = est.update(i + 1)
+    assert snap["eta_label"] == "Calibrating…"
+    assert snap["eta_seconds"] is None
+
+    # 20th update and beyond: enough samples → estimating
+    for i in range(19, 119):
+        time.sleep(0.005)  # ~200 updates/s → rate is meaningful
+        snap = est.update(i + 1)
+    assert snap["eta_seconds"] is not None
+    assert snap["eta_seconds"] > 0
+    assert "min remaining" in snap["eta_label"] or "s remaining" in snap["eta_label"]
+
+
+def test_progress_estimator_never_zero_before_end():
+    from curator.web.progress import ProgressEstimator
+    import time
+    est = ProgressEstimator(total=100, min_samples=5)
+    for i in range(99):
+        time.sleep(0.005)
+        est.update(i + 1)
+    snap = est.update(99)
+    # even at 99/100, ETA must be > 0 (never "0s remaining" while bar < 100%)
+    if snap["eta_seconds"] is not None:
+        assert snap["eta_seconds"] >= 0
+
+
+def test_analyze_status_endpoint_shape():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    client = app.test_client()
+    r = client.get("/api/analyze/status")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert set(body.keys()) >= {"running", "progress", "error", "current_task"}
+
+
+def test_analyze_simulate_returns_ok():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    client = app.test_client()
+    r = client.post("/api/analyze/simulate", json={"total": 50})
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
