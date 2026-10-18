@@ -14,7 +14,9 @@ def create_app(db_path: str | Path = "curator.db", use_fixtures: bool = False) -
     app.config["DB_PATH"] = str(db_path)
     app.config["USE_FIXTURES"] = use_fixtures
 
-    from .views import bp
+    from .views import bp, close_db
     app.register_blueprint(bp)
+    # teardown_appcontext is an app-level hook, not a Blueprint one.
+    app.teardown_appcontext(close_db)
 
     return app

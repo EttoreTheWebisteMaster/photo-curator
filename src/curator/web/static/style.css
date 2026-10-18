@@ -89,7 +89,8 @@ kbd {
 /* ---------- App layout ---------- */
 .app {
     display: grid;
-    grid-template-columns: 272px minmax(0, 1fr) 340px;
+    grid-template-columns:
+        var(--sidebar-w, 272px) 4px minmax(0, 1fr) 4px var(--detail-w, 340px);
     height: 100vh;
     overflow: hidden;
     position: relative;
@@ -98,7 +99,6 @@ kbd {
 /* ---------- SIDEBAR ---------- */
 .sidebar {
     background: var(--bg-surface);
-    border-right: 1px solid var(--hairline);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -188,6 +188,9 @@ kbd {
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
+    min-width: 16px;
+    text-align: right;
+    letter-spacing: 0.02em;
 }
 
 /* ---------- MAIN ---------- */
@@ -269,7 +272,6 @@ kbd {
 /* ---------- DETAIL ---------- */
 .detail {
     background: var(--bg-surface);
-    border-left: 1px solid var(--hairline);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -556,12 +558,11 @@ kbd {
 
 /* ---------- RESPONSIVE ---------- */
 @media (max-width: 1100px) {
-    .app { grid-template-columns: 240px minmax(0, 1fr) 300px; }
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 900px) {
-    .app { grid-template-columns: 220px minmax(0, 1fr); }
-    .detail { display: none; }
+    .app { grid-template-columns: var(--sidebar-w, 220px) 4px minmax(0, 1fr); }
+    .resizer--right, .detail { display: none; }
 }
 
 /* ---------- REDUCED MOTION ---------- */
@@ -716,4 +717,32 @@ kbd {
     color: var(--text-tertiary);
     margin: 0;
     line-height: 1.5;
+}
+
+/* ---------- COLUMN RESIZERS ---------- */
+.resizer {
+    position: relative;
+    cursor: col-resize;
+    touch-action: none;
+    background: transparent;
+    user-select: none;
+}
+.resizer::before {
+    content: '';
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--hairline);
+    transition: background var(--dur-fast) var(--ease-out);
+}
+.resizer:hover::before,
+.resizer.is-dragging::before {
+    background: var(--accent);
+}
+body.is-dragging-column,
+body.is-dragging-column * {
+    cursor: col-resize !important;
+    user-select: none !important;
 }

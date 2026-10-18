@@ -2,23 +2,45 @@ function curatorApp() {
     return {
         groups: [],
         selectedId: null,
+        selectedDetail: null,
+        loadingDetail: false,
+        saving: false,
         showShortcuts: false,
         showHintBar: false,
         undoStack: [],
+        sidebarWidth: 272,
+        detailWidth: 340,
+        _resizeHandler: null,
 
-        init() {
+        async init() {
             const data = JSON.parse(document.getElementById('initial-data').textContent);
             this.groups = data.groups;
-            if (this.groups.length > 0) {
-                const pending = this.groups.find(g => g.status === 'pending') || this.groups[0];
-                this.select(pending.id);
+            if (data.useFixtures) {
+                // Fixtures: photos are in the payload, no fetch needed
+                if (this.groups.length > 0) {
+                    const first = this.groups.find(g => g.status === 'pending') || this.groups[0];
+                    this.selectedId = first.id;
+                    this.selectedDetail = first;
+                }
+            } else {
+                this.selectedDetail = data.initialDetail;
+                this.selectedId = data.initialDetail ? data.initialDetail.id : null;
             }
             if (!localStorage.getItem('curator-hint-dismissed')) {
                 this.showHintBar = true;
                 setTimeout(() => { this.showHintBar = false; }, 8000);
             }
 
-            this.pollAnalysis();
+            // Load saved column widths
+            try {
+                const saved = JSON.parse(localStorage.getItem('curator-widths') || '{}');
+                if (typeof saved.sidebar === 'number') this.sidebarWidth = saved.sidebar;
+                if (typeof saved.detail === 'number')  this.detailWidth  = saved.detail;
+            } catch {}
+
+            // Clamp on window resize so nothing disappears off-screen
+            this._resizeHandler = () => this.clampWidths();
+            window.addEventListener('resize', this._resizeHandler);
         },
 
         /* ---------- Getters ---------- */
@@ -26,154 +48,225 @@ function curatorApp() {
             return this.groups.find(g => g.id === this.selectedId) || null;
         },
         get currentWinner() {
-            const g = this.selectedGroup;
-            if (!g) return null;
-            return g.photos.find(p => p.id === g.current_winner) || null;
+            const d = this.selectedDetail;
+            if (!d || d.current_winner == null) return null;
+            return d.photos.find(p => p.id === d.current_winner) || null;
         },
         get rejectedPhotos() {
-            const g = this.selectedGroup;
-            if (!g) return [];
-            return g.photos.filter(p => p.id !== g.current_winner && p.status !== 'deleted');
+            const d = this.selectedDetail;
+            if (!d) return [];
+            return d.photos.filter(p => p.id !== d.current_winner);
         },
         get pendingCount() {
             return this.groups.filter(g => g.status === 'pending').length;
         },
+        get completedCount() {
+            return this.groups.filter(g => g.status === 'completed' || g.status === 'deleted').length;
+        },
+        get ringPercent() {
+            if (this.groups.length === 0) return 0;
+            return Math.round((this.completedCount / this.groups.length) * 100);
+        },
+        get ringOffset() {
+            return (100.53 * (1 - this.ringPercent / 100)).toFixed(2);
+        },
+        get isFixtures() {
+            return JSON.parse(document.getElementById('initial-data').textContent).useFixtures;
+        },
 
         /* ---------- Helpers ---------- */
         winnerThumb(group) {
-            const w = group.photos.find(p => p.id === group.current_winner);
-            return w ? w.thumb : '';
+            return group.thumb || '';
         },
         formatDate(iso) {
+            if (!iso) return '';
             const d = new Date(iso);
             const now = new Date();
-            const sameDay = d.toDateString() === now.toDateString();
-            if (sameDay) return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            if (d.toDateString() === now.toDateString()) {
+                return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            }
             return d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
         },
 
-        /* ---------- Actions ---------- */
-        select(id) {
+        /* ---------- Selection ---------- */
+        async select(id) {
             this.selectedId = id;
             this.$nextTick(() => {
                 const el = this.$refs['group-' + id];
                 if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             });
+            if (this.isFixtures) {
+                this.selectedDetail = this.groups.find(g => g.id === id) || null;
+                return;
+            }
+            if (this.selectedDetail?.id === id) return;
+            this.loadingDetail = true;
+            try {
+                const r = await fetch(`/api/groups/${id}`);
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                this.selectedDetail = await r.json();
+            } catch (e) {
+                this.toast(`Could not load group ${id}`, null, null);
+            } finally {
+                this.loadingDetail = false;
+            }
         },
 
-        openLightbox(photoId) {
-            const g = this.selectedGroup;
-            if (!g) return;
-            const photos = g.photos.filter(p => p.status !== 'deleted');
-            const idx = photos.findIndex(p => p.id === photoId);
-            if (idx === -1) return;
-            this.$dispatch('open-lightbox', { photos, index: idx });
+        /* ---------- Actions ---------- */
+        async promotePhoto(photoId) {
+            const d = this.selectedDetail;
+            if (!d || d.status === 'deleted' || this.saving) return;
+            const prevWinner = d.current_winner;
+            const prevStatus = d.status;
+            d.current_winner = photoId;
+            if (d.status === 'completed') {
+                d.status = 'pending';
+                const g = this.groups.find(g => g.id === d.id);
+                if (g) g.status = 'pending';
+            }
+            if (this.isFixtures) { this._fixturesMark(photoId); return; }
+            this.saving = true;
+            try {
+                const r = await fetch(`/api/groups/${d.id}/choose`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ photo_id: photoId }),
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            } catch (e) {
+                d.current_winner = prevWinner;
+                d.status = prevStatus;
+                this.toast('Could not save choice', null, null);
+            } finally {
+                this.saving = false;
+            }
         },
 
-        promotePhoto(photoId) {
-            const g = this.selectedGroup;
-            if (!g || g.status === 'deleted') return;
-            const incoming = g.photos.find(p => p.id === photoId);
-            if (!incoming) return;
-            const prevWinnerId = g.current_winner;
-            const prevStatus = g.status;
-            const outgoing = g.photos.find(p => p.id === prevWinnerId);
-            if (outgoing) outgoing.status = 'rejected';
-            incoming.status = 'winner';
-            g.current_winner = incoming.id;
-            if (g.status === 'completed') g.status = 'pending';
-            this.pushUndo(() => {
-                if (incoming.status === 'winner') incoming.status = 'rejected';
-                if (outgoing) outgoing.status = 'winner';
-                g.current_winner = prevWinnerId;
-                g.status = prevStatus;
-            });
-        },
-
-        confirmGroup() {
-            const g = this.selectedGroup;
-            if (!g || g.status !== 'pending') return;
-            const prevStatus = g.status;
-            g.status = 'completed';
-            this.pushUndo(() => { g.status = prevStatus; });
+        async confirmGroup() {
+            const d = this.selectedDetail;
+            if (!d || d.status !== 'pending' || this.saving) return;
+            const prevStatus = d.status;
+            d.status = 'completed';
+            const g = this.groups.find(g => g.id === d.id);
+            if (g) g.status = 'completed';
+            if (this.isFixtures) { this.advanceToNextPending(); return; }
+            this.saving = true;
+            try {
+                const r = await fetch(`/api/groups/${d.id}/confirm`, { method: 'POST' });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            } catch (e) {
+                d.status = prevStatus;
+                if (g) g.status = prevStatus;
+                this.toast('Could not confirm', null, null);
+                return;
+            } finally {
+                this.saving = false;
+            }
             this.advanceToNextPending();
         },
 
-        deleteGroup() {
-            const g = this.selectedGroup;
-            if (!g || g.status === 'deleted') return;
-            const prevStatus = g.status;
-            g.status = 'deleted';
-            this.pushUndo(() => { g.status = prevStatus; });
+        async deleteGroup() {
+            const d = this.selectedDetail;
+            if (!d || d.status === 'deleted' || this.saving) return;
+            const prevStatus = d.status;
+            d.status = 'deleted';
+            const g = this.groups.find(g => g.id === d.id);
+            if (g) g.status = 'deleted';
+            if (this.isFixtures) { this.advanceToNextPending(); return; }
+            this.saving = true;
+            try {
+                const r = await fetch(`/api/groups/${d.id}/delete`, { method: 'POST' });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            } catch (e) {
+                d.status = prevStatus;
+                if (g) g.status = prevStatus;
+                this.toast('Could not delete', null, null);
+                return;
+            } finally {
+                this.saving = false;
+            }
             this.toast(
-                `Group ${g.id} deleted — photos still on disk`,
+                `Group ${d.id} deleted — photos still on disk`,
                 'Undo',
-                () => { g.status = prevStatus; this.selectedId = g.id; }
+                () => this.restoreGroup(),
             );
             this.advanceToNextPending();
         },
 
-        restoreGroup() {
-            const g = this.selectedGroup;
-            if (!g || g.status !== 'deleted') return;
-            g.status = 'pending';
+        async restoreGroup() {
+            const d = this.selectedDetail;
+            if (!d || d.status !== 'deleted') return;
+            const prevStatus = d.status;
+            d.status = 'pending';
+            const g = this.groups.find(g => g.id === d.id);
+            if (g) g.status = 'pending';
+            if (this.isFixtures) return;
+            try {
+                const r = await fetch(`/api/groups/${d.id}/restore`, { method: 'POST' });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            } catch (e) {
+                d.status = prevStatus;
+                if (g) g.status = prevStatus;
+                this.toast('Could not restore', null, null);
+            }
+        },
+
+        _fixturesMark(photoId) {
+            const d = this.selectedDetail;
+            const incoming = d.photos.find(p => p.id === photoId);
+            if (incoming) incoming.status = 'winner';
         },
 
         advanceToNextPending() {
             const idx = this.groups.findIndex(g => g.id === this.selectedId);
             const order = [...this.groups.slice(idx + 1), ...this.groups.slice(0, idx)];
             const next = order.find(g => g.status === 'pending');
-            if (next) {
-                this.select(next.id);
-            } else if (this.pendingCount === 0) {
-                this.toast('All groups reviewed', null, null);
-            }
+            if (next) this.select(next.id);
+            else if (this.pendingCount === 0) this.toast('All groups reviewed', null, null);
         },
 
         navigate(delta) {
             const idx = this.groups.findIndex(g => g.id === this.selectedId);
-            if (idx === -1) {
-                this.select(this.groups[0].id);
-                return;
-            }
+            if (idx === -1) { if (this.groups[0]) this.select(this.groups[0].id); return; }
             const next = Math.max(0, Math.min(this.groups.length - 1, idx + delta));
             this.select(this.groups[next].id);
         },
 
-        /* ---------- Undo ---------- */
         pushUndo(fn) {
             this.undoStack.push(fn);
             if (this.undoStack.length > 30) this.undoStack.shift();
         },
         undo() {
             const fn = this.undoStack.pop();
-            if (fn) {
-                fn();
-                this.toast('Undone', null, null);
-            }
+            if (fn) { fn(); this.toast('Undone', null, null); }
+        },
+
+        /* ---------- Lightbox ---------- */
+        openLightbox(photoId) {
+            const d = this.selectedDetail;
+            if (!d) return;
+            const photos = d.photos.map(p => ({ id: p.id, url: p.url }));
+            const idx = photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            this.$dispatch('open-lightbox', { photos, index: idx });
         },
 
         /* ---------- Keyboard ---------- */
         onKey(e) {
             const tag = (e.target.tagName || '').toLowerCase();
             if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-
             if (e.key === 'Escape') {
                 if (this.showShortcuts) { this.showShortcuts = false; e.preventDefault(); return; }
                 this.selectedId = null;
                 e.preventDefault();
                 return;
             }
-            if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-                this.undo(); e.preventDefault(); return;
-            }
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { this.undo(); e.preventDefault(); return; }
             if (e.metaKey || e.ctrlKey || e.altKey) return;
-
             if (e.key === '?') { this.showShortcuts = !this.showShortcuts; e.preventDefault(); return; }
             if (this.showShortcuts) return;
-
-            if (e.key === 'j' || e.key === 'ArrowDown') { this.navigate(1);  e.preventDefault(); return; }
-            if (e.key === 'k' || e.key === 'ArrowUp')   { this.navigate(-1); e.preventDefault(); return; }
+            if (e.key === 'j' || e.key === 'ArrowDown') { this.navigate(1); e.preventDefault(); return; }
+            if (e.key === 'k' || e.key === 'ArrowUp') { this.navigate(-1); e.preventDefault(); return; }
             if (e.key === 'Enter') { this.confirmGroup(); e.preventDefault(); return; }
             if (e.key === 'Backspace' || e.key === 'Delete') { this.deleteGroup(); e.preventDefault(); return; }
             if (/^[1-9]$/.test(e.key)) {
@@ -188,14 +281,11 @@ function curatorApp() {
             const el = document.createElement('div');
             el.className = 'toast';
             const txt = document.createElement('span');
-            txt.className = 'toast__text';
-            txt.textContent = text;
+            txt.className = 'toast__text'; txt.textContent = text;
             el.appendChild(txt);
             if (actionLabel) {
                 const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'toast__action';
-                btn.textContent = actionLabel;
+                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
                 btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
                 el.appendChild(btn);
             }
@@ -209,74 +299,88 @@ function curatorApp() {
             setTimeout(() => el.remove(), 200);
         },
 
-        /* ---------- Hint bar ---------- */
         dismissHint() {
             this.showHintBar = false;
             localStorage.setItem('curator-hint-dismissed', '1');
         },
 
-        // --- Progress ring ---
-        get completedCount() {
-            return this.groups.filter(g => g.status === 'completed' || g.status === 'deleted').length;
-        },
-        get ringPercent() {
-            if (this.groups.length === 0) return 0;
-            return Math.round((this.completedCount / this.groups.length) * 100);
-        },
-        get ringOffset() {
-            // 2πr con r=16 → circonferenza ≈ 100.53
-            return (100.53 * (1 - this.ringPercent / 100)).toFixed(2);
+                /* ---------- Column resize ---------- */
+        clampWidths() {
+            const w = window.innerWidth;
+            const minMain = 320;
+            this.sidebarWidth = Math.max(220, Math.min(480,
+                Math.min(this.sidebarWidth, w - this.detailWidth - minMain - 8)));
+            this.detailWidth = Math.max(300, Math.min(760,
+                Math.min(this.detailWidth, w - this.sidebarWidth - minMain - 8)));
         },
 
-        // --- Analysis polling (Sprint 1: endpoint simulate; Sprint 3: same shape) ---
-        analysis: { running: false, progress: null, current_task: null, error: null },
-        analysisPoller: null,
-        pollAnalysis() {
-            if (this.analysisPoller) return;
-            const tick = async () => {
-                try {
-                    const r = await fetch('/api/analyze/status');
-                    this.analysis = await r.json();
-                    if (!this.analysis.running) {
-                        clearInterval(this.analysisPoller);
-                        this.analysisPoller = null;
-                    }
-                } catch {}
+        startDrag(which, e) {
+            if (e.button !== 0) return;
+            e.preventDefault();
+
+            const handle = e.currentTarget;
+            const startX = e.clientX;
+            const startSidebar = this.sidebarWidth;
+            const startDetail = this.detailWidth;
+
+            handle.setPointerCapture(e.pointerId);
+            handle.classList.add('is-dragging');
+            document.body.classList.add('is-dragging-column');
+
+            const onMove = (ev) => {
+                const w = window.innerWidth;
+                const minMain = 320;
+                if (which === 'sidebar') {
+                    const delta = ev.clientX - startX;
+                    const maxAllowed = Math.min(480, w - this.detailWidth - minMain - 8);
+                    this.sidebarWidth = Math.max(220, Math.min(maxAllowed, startSidebar + delta));
+                } else {
+                    const delta = startX - ev.clientX;
+                    const maxAllowed = Math.min(760, w - this.sidebarWidth - minMain - 8);
+                    this.detailWidth = Math.max(300, Math.min(maxAllowed, startDetail + delta));
+                }
             };
-            tick();
-            this.analysisPoller = setInterval(tick, 2000);
-        },
-        startFakeAnalysis() {
-            fetch('/api/analyze/simulate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ total: 318 }),
-            }).then(() => this.pollAnalysis());
+
+            const onUp = () => {
+                handle.removeEventListener('pointermove', onMove);
+                handle.removeEventListener('pointerup', onUp);
+                handle.removeEventListener('pointercancel', onUp);
+                handle.classList.remove('is-dragging');
+                document.body.classList.remove('is-dragging-column');
+                try { handle.releasePointerCapture(e.pointerId); } catch {}
+                localStorage.setItem('curator-widths', JSON.stringify({
+                    sidebar: this.sidebarWidth,
+                    detail:  this.detailWidth,
+                }));
+            };
+
+            handle.addEventListener('pointermove', onMove);
+            handle.addEventListener('pointerup', onUp);
+            handle.addEventListener('pointercancel', onUp);
         },
 
+        resetWidth(which) {
+            if (which === 'sidebar') this.sidebarWidth = 272;
+            else                     this.detailWidth  = 340;
+            try {
+                localStorage.setItem('curator-widths', JSON.stringify({
+                    sidebar: this.sidebarWidth,
+                    detail:  this.detailWidth,
+                }));
+            } catch {}
+        },
     };
 }
 
 function lightbox() {
     return {
-        open: false,
-        photos: [],
-        index: 0,
-        zoom: false,
-        zoomX: 50, zoomY: 50,
-
+        open: false, photos: [], index: 0, zoom: false, zoomX: 50, zoomY: 50,
         show(photos, startIndex = 0) {
-            this.photos = photos;
-            this.index = startIndex;
-            this.open = true;
-            this.zoom = false;
+            this.photos = photos; this.index = startIndex;
+            this.open = true; this.zoom = false;
             document.body.style.overflow = 'hidden';
         },
-        close() {
-            this.open = false;
-            this.zoom = false;
-            document.body.style.overflow = '';
-        },
+        close() { this.open = false; this.zoom = false; document.body.style.overflow = ''; },
         next() { if (this.index < this.photos.length - 1) { this.index++; this.zoom = false; } },
         prev() { if (this.index > 0) { this.index--; this.zoom = false; } },
         toggleZoom(e) {
@@ -285,9 +389,7 @@ function lightbox() {
                 this.zoomX = ((e.clientX - rect.left) / rect.width) * 100;
                 this.zoomY = ((e.clientY - rect.top) / rect.height) * 100;
                 this.zoom = true;
-            } else {
-                this.zoom = false;
-            }
+            } else this.zoom = false;
         },
         get current() { return this.photos[this.index]; },
         get transform() {

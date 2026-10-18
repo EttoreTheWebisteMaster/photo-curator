@@ -130,7 +130,7 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
 def build_groups(conn, *, session_gap_min: float = 30.0,
                  method: str = "phash", model: str | None = None,
                  max_hamming: int = 10, cosine_threshold: float = 0.20) -> dict:
-    """Group by session and similarity, then persist to the `groups` table."""
+    """Group by session and similarity, then persist to `groups` + `group_states`."""
     assignments, meta = compute_assignments(
         conn,
         session_gap_min=session_gap_min,
@@ -144,6 +144,20 @@ def build_groups(conn, *, session_gap_min: float = 30.0,
     conn.executemany(
         "INSERT INTO groups (photo_id, group_id, run_id) VALUES (?,?,?)",
         [(pid, gid, run_id) for pid, gid in assignments],
+    )
+
+    # Step 3: rebuild group_states. Regenerating groups invalidates prior decisions.
+    # `assignments` is already ordered by (taken_at, id), so the first entry per
+    # group_id is the deterministic default winner.
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute("DELETE FROM group_states")
+    first_by_group: dict[int, int] = {}
+    for pid, gid in assignments:
+        first_by_group.setdefault(gid, pid)
+    conn.executemany(
+        "INSERT INTO group_states (group_id, status, current_winner_photo_id, updated_at) "
+        "VALUES (?, 'pending', ?, ?)",
+        [(gid, pid, now) for gid, pid in sorted(first_by_group.items())],
     )
     conn.commit()
     return {"run_id": run_id, **meta}

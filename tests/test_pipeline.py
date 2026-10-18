@@ -338,8 +338,9 @@ def test_web_app_serves_index_with_fixtures():
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.data.decode()
-    assert "Groups" in body          # era "Gruppi" — l'UI è ora in inglese
-    assert "Fixtures" in body
+    # Sidebar is client-rendered from initial-data JSON; assert on the payload.
+    assert '"useFixtures": true' in body
+    assert '"groups":' in body
 
 
 def test_web_api_endpoints_return_ok():
@@ -407,3 +408,70 @@ def test_analyze_simulate_returns_ok():
     r = client.post("/api/analyze/simulate", json={"total": 50})
     assert r.status_code == 200
     assert r.get_json()["ok"] is True
+
+
+def test_build_groups_populates_group_states(tmp_path):
+    from curator import db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    # Different seeds (distinct pHash) AND different dates (distinct sessions)
+    # so we are guaranteed two groups, regardless of similarity thresholds.
+    save(make_scene(1), root / "a0.jpg", "2026:10:01 10:00:00")
+    save(make_scene(2), root / "b0.jpg", "2026:10:02 18:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    rows = conn.execute("SELECT * FROM group_states ORDER BY group_id").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["status"] == "pending"
+        assert r["current_winner_photo_id"] is not None
+
+
+def test_api_choose_confirm_delete_persist(tmp_path):
+    from curator import db, group, scan
+    from curator.web.app import create_app
+    from PIL import Image
+
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (64, 48), (200, 100, 50)).save(root / "a0.jpg")
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(root / "b0.jpg")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+
+    detail = client.get("/api/groups/1").get_json()
+    assert detail is not None and len(detail["photos"]) == 2
+    pids = [p["id"] for p in detail["photos"]]
+    other = pids[1] if detail["current_winner"] == pids[0] else pids[0]
+
+    # Choose
+    r = client.post("/api/groups/1/choose", json={"photo_id": other})
+    assert r.status_code == 200
+    assert client.get("/api/groups/1").get_json()["current_winner"] == other
+
+    # Confirm
+    r = client.post("/api/groups/1/confirm")
+    assert r.status_code == 200 and r.get_json()["status"] == "completed"
+    winner_label = conn.execute(
+        "SELECT photo_id FROM labels WHERE group_id=1 AND label='winner'"
+    ).fetchone()
+    assert winner_label[0] == other
+
+    # Delete
+    r = client.post("/api/groups/1/delete")
+    assert r.status_code == 200 and r.get_json()["status"] == "deleted"
+
+    # Restore
+    r = client.post("/api/groups/1/restore")
+    assert r.status_code == 200 and r.get_json()["status"] == "pending"
+
+
+def test_api_group_404(tmp_path):
+    from curator import db
+    from curator.web.app import create_app
+    db.connect(tmp_path / "t.db").close()
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    assert app.test_client().get("/api/groups/999").status_code == 404

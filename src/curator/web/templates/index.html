@@ -5,11 +5,13 @@
 {
     "groups": {{ groups | tojson }},
     "pendingCount": {{ pending_count }},
-    "useFixtures": {{ use_fixtures | tojson }}
+    "useFixtures": {{ use_fixtures | tojson }},
+    "initialDetail": {{ initial_detail | tojson }}
 }
 </script>
 
-<div x-data="curatorApp()" @keydown.window="onKey($event)" class="app">
+<div x-data="curatorApp()" @keydown.window="onKey($event)" class="app"
+     :style="`--sidebar-w: ${sidebarWidth}px; --detail-w: ${detailWidth}px`">
 
     <!-- SIDEBAR -->
     <aside class="sidebar" aria-label="Groups">
@@ -56,11 +58,22 @@
                         <span class="group-row__title" x-text="'Group ' + group.id"></span>
                         <span class="group-row__meta" x-text="formatDate(group.taken_at)"></span>
                     </span>
-                    <span class="group-row__count" x-text="group.photos.length"></span>
+                    <span class="group-row__count"
+                        x-text="group.photo_count"
+                        :title="(group.photo_count || 0) + ' photos'"></span>
                 </button>
             </template>
         </nav>
     </aside>
+
+    <div class="resizer resizer--left"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="sidebarWidth"
+        aria-valuemin="220"
+        aria-valuemax="480"
+        @pointerdown="startDrag('sidebar', $event)"
+        @dblclick="resetWidth('sidebar')"></div>
 
     <!-- MAIN -->
     <main class="main">
@@ -137,6 +150,15 @@
             </div>
         </template>
     </main>
+
+    <div class="resizer resizer--right"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="detailWidth"
+        aria-valuemin="300"
+        aria-valuemax="760"
+        @pointerdown="startDrag('detail', $event)"
+        @dblclick="resetWidth('detail')"></div>
 
     <!-- DETAIL -->
     <aside class="detail" aria-label="Chosen photo">
