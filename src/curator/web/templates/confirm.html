@@ -15,8 +15,8 @@
             <header class="confirm-header">
                 <div>
                     <div class="main__label">Final review</div>
-                    <h1 class="main__title">Review your organization plan</h1>
-                    <p class="confirm-header__intro">Review the destination and filename format before organizing.</p>
+                    <h1 class="main__title">Confirm your organization</h1>
+                    <p class="confirm-header__intro">Review what will move, where it goes, and how files will be named. Nothing will be deleted.</p>
                 </div>
                 <div class="confirm-status" role="status">
                     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -90,29 +90,40 @@
                         </div>
                         <p>Confirming moves files into separate <code>winner</code> and <code>rejected</code> folders here. Nothing is deleted.</p>
                     </section>
-                    <section class="commit-summary" aria-label="Files to organize">
+                    <section class="commit-summary" aria-label="Photos and files to organize">
                         <div class="commit-summary__total">
                             <span>Files to organize</span>
                             <strong x-text="data.stats.total_moves"></strong>
-                            <span class="commit-summary__size" x-text="formatSize(data.stats.total_size) + ' total'"></span>
+                            <span class="commit-summary__size" x-text="`${photoCount()} photos · ${formatSize(data.stats.total_size)} total`"></span>
                         </div>
                         <dl class="commit-summary__counts">
                             <div>
                                 <dt>Keepers</dt>
-                                <dd x-text="data.stats.winner"></dd>
-                                <span class="commit-summary__percentage" x-text="percentage(data.stats.winner) + ' of files'"></span>
+                                <dd x-text="data.stats.winner_photos"></dd>
+                                <span class="commit-summary__percentage" x-text="`${formatSize(data.stats.winner_size)} including companion files`"></span>
                             </div>
                             <div>
-                                <dt>Rejected</dt>
-                                <dd x-text="data.stats.rejected"></dd>
-                                <span class="commit-summary__percentage" x-text="percentage(data.stats.rejected) + ' of files'"></span>
+                                <dt>Rejected, not deleted</dt>
+                                <dd x-text="data.stats.rejected_photos"></dd>
+                                <span class="commit-summary__percentage" x-text="`${formatSize(data.stats.rejected_size)} including companion files`"></span>
                             </div>
                             <div>
                                 <dt>Live Photo files</dt>
                                 <dd x-text="data.stats.companion || 0"></dd>
-                                <span class="commit-summary__percentage" x-text="percentage(data.stats.companion || 0) + ' of files'"></span>
+                                <span class="commit-summary__percentage">moved with their photos</span>
                             </div>
                         </dl>
+                    </section>
+
+                    <section class="confirm-recap" aria-label="Space and AI recap">
+                        <p class="confirm-space-note">
+                            <strong>Space freed: 0 B.</strong>
+                            Rejected photos will be moved to the Rejected folder, not deleted. You can review or delete them later.
+                        </p>
+                        <div class="confirm-ai-note">
+                            <strong>AI-assisted choices</strong>
+                            <span x-text="`${formatCount(data.stats.ai_keeper_picks || 0)} keeper picks · ${formatCount(data.stats.ai_suggested_count || 0)} reject suggestions`"></span>
+                        </div>
                     </section>
 
                     <section class="plan-preview" aria-labelledby="plan-preview-title">
@@ -150,41 +161,12 @@
     <aside class="detail confirm-actions" aria-label="Confirmation and destination">
         <div class="detail__inner">
             <header class="detail__header">
-                <div class="detail__label">Before you organize</div>
+                <div class="detail__label">Final check</div>
             </header>
             <div class="confirm-actions__content">
-                <section class="confirm-destination" aria-labelledby="confirm-destination-title">
-            <h2 id="confirm-destination-title">From your source folder</h2>
-            <code x-text="data.stats?.source_root || 'Loading source folder…'"></code>
-            <div class="confirm-destination__next">
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                    <path d="M10 2.5v14"></path>
-                    <path d="m4.5 11 5.5 5.5 5.5-5.5"></path>
-                </svg>
-                <span>Into this new folder</span>
-            </div>
-            <code x-text="data.stats?.curator_root || 'Loading destination…'"></code>
-            <p class="confirm-destination__explanation">
-                Inside it, <code>winner/</code> holds selected photos and <code>rejected/</code> holds the rest.
-            </p>
-                </section>
-                <p class="confirm-actions__intro">After you confirm:</p>
-                <ul class="confirm-checklist">
-            <li>
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
-                Files are renamed using the example above and moved into the folders shown here.
-            </li>
-                    <li>
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
-                        Photos are moved, not deleted.
-                    </li>
-                    <li>
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
-                        An undo record is saved.
-                    </li>
-                </ul>
-                <p class="confirm-safety">
-                    Nothing has moved yet. <strong>Confirm &amp; organize</strong> starts the move; you can undo it afterward.
+                <p class="confirm-actions__summary">
+                    <strong>Ready when you are.</strong>
+                    Files move into Keepers and Rejected. Nothing is deleted, and no disk space is freed.
                 </p>
             </div>
             <footer class="detail__footer">

@@ -100,6 +100,52 @@ def test_sharpness_ranks_blurred_lower(photos, tmp_path):
     assert s["a2_blurry.jpg"] < s["a1.jpg"] * 0.5
 
 
+def test_scan_persists_real_brightness_and_clipping(tmp_path):
+    root = tmp_path / "metrics"
+    root.mkdir()
+    pixels = np.zeros((32, 32, 3), dtype=np.uint8)
+    pixels[16:, :, :] = 255
+    Image.fromarray(pixels).save(root / "sample.png")
+    conn = db.connect(tmp_path / "metrics.db")
+    scan.scan(root, conn)
+    row = conn.execute(
+        "SELECT brightness, shadow_clip, highlight_clip FROM photos WHERE error IS NULL"
+    ).fetchone()
+    assert row["brightness"] == pytest.approx(0.5, abs=0.02)
+    assert row["shadow_clip"] == pytest.approx(0.5)
+    assert row["highlight_clip"] == pytest.approx(0.5)
+
+
+def test_rebuilding_groups_preserves_unchanged_review_decision(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    save(make_scene(11), root / "first.jpg", "2026:10:01 10:00:00")
+    save(make_scene(11), root / "second.jpg", "2026:10:01 10:00:02", quality=85)
+    conn = db.connect(tmp_path / "review.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    group_id = conn.execute("SELECT group_id FROM groups LIMIT 1").fetchone()[0]
+    winner = conn.execute(
+        "SELECT photo_id FROM groups WHERE group_id=? ORDER BY photo_id DESC",
+        (group_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE group_states SET status='completed', current_winner_photo_id=? "
+        "WHERE group_id=?",
+        (winner, group_id),
+    )
+    conn.commit()
+
+    group.build_groups(conn)
+    preserved = conn.execute(
+        "SELECT status, current_winner_photo_id FROM group_states "
+        "WHERE group_id=(SELECT group_id FROM groups WHERE photo_id=?)",
+        (winner,),
+    ).fetchone()
+    assert preserved["status"] == "completed"
+    assert preserved["current_winner_photo_id"] == winner
+
+
 def test_incremental_rescan(photos, tmp_path):
     conn = db.connect(tmp_path / "t.db")
     scan.scan(photos, conn)
@@ -127,6 +173,51 @@ def test_grouping_by_session_and_similarity(photos, tmp_path):
     assert g["b1.jpg"] != g["a1.jpg"]          # different scene
     assert g["c1.jpg"] != g["a1.jpg"]          # another day = another session
     assert res["sessions"] == 2
+
+
+def test_phash_grouping_does_not_chain_dissimilar_anchors(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    ids = [_insert_photo(conn, f"chain{i}", 1) for i in range(3)]
+    hashes = ("0000000000000000", "0000000000000001", "0000000000000003")
+    for index, (photo_id, phash) in enumerate(zip(ids, hashes)):
+        conn.execute(
+            "UPDATE photos SET phash = ?, taken_at = ? WHERE id = ?",
+            (phash, f"2026-10-01T10:00:0{index}", photo_id),
+        )
+    conn.commit()
+
+    group.build_groups(conn, method="phash", max_hamming=1)
+    assigned = {
+        row["photo_id"]: row["group_id"]
+        for row in conn.execute("SELECT photo_id, group_id FROM groups")
+    }
+    assert assigned[ids[0]] == assigned[ids[1]]
+    assert assigned[ids[1]] != assigned[ids[2]]
+
+
+def test_smart_grouping_does_not_chain_dissimilar_anchors(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    ids = [_insert_photo(conn, f"smart-chain{i}", 1) for i in range(3)]
+    for index, photo_id in enumerate(ids):
+        conn.execute(
+            "UPDATE photos SET phash = NULL, taken_at = ? WHERE id = ?",
+            (f"2026-10-01T10:00:0{index}", photo_id),
+        )
+    angles = np.deg2rad([0, 40, 80])
+    for photo_id, angle in zip(ids, angles):
+        embeddings.save_embedding(
+            conn, photo_id, "chain-test",
+            np.array([np.cos(angle), np.sin(angle)], dtype=np.float32),
+        )
+    conn.commit()
+
+    group.build_groups(conn, method="smart", model="chain-test")
+    assigned = {
+        row["photo_id"]: row["group_id"]
+        for row in conn.execute("SELECT photo_id, group_id FROM groups")
+    }
+    assert assigned[ids[0]] == assigned[ids[1]]
+    assert assigned[ids[1]] != assigned[ids[2]]
 
 
 def test_photoslibrary_is_rejected(tmp_path):
@@ -357,6 +448,10 @@ def test_web_app_serves_index_with_fixtures():
     assert '"groups":' in body
     assert "Every photo group reviewed" in body
     assert "All groups reviewed" not in body
+    assert "Edge detail" not in body
+    assert "Brightness" not in body
+    assert "Dimensions" not in body
+    assert 'class="detail__meta"' not in body
 
 
 def test_web_api_endpoints_return_ok():
@@ -648,10 +743,12 @@ def test_rejected_keep_promotes_photo(tmp_path):
     # Verify it shows in rejected
     data = client.get("/api/rejected").get_json()
     assert data["total"] == 1 and len(data["photos"]) == 1
+    assert data["reviewed"] == 0
 
     # Keep it
     r = client.post(f"/api/rejected/{pid}/keep")
     assert r.status_code == 200
+    feedback_id = r.get_json()["feedback_id"]
 
     # Now it's not rejected anymore, and is not a duplicate or utility
     row = conn.execute("SELECT is_utility, duplicate_of, rejected_reviewed_at "
@@ -662,6 +759,22 @@ def test_rejected_keep_promotes_photo(tmp_path):
 
     data = client.get("/api/rejected").get_json()
     assert data["total"] == 0 or len(data["photos"]) == 0
+    assert data["total"] == 1
+    assert data["reviewed"] == 1
+
+    # Undo restores the system flag and retracts the model label.
+    assert client.post(f"/api/feedback/{feedback_id}/undo").status_code == 200
+    data = client.get("/api/rejected").get_json()
+    assert data["total"] == 1
+    assert data["reviewed"] == 0
+    row = conn.execute(
+        "SELECT is_utility, rejected_reviewed_at FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["is_utility"] == 1
+    assert row["rejected_reviewed_at"] is None
+    assert conn.execute(
+        "SELECT active FROM user_feedback WHERE id=?", (feedback_id,)
+    ).fetchone()["active"] == 0
 
 
 def test_rejected_accept_all(tmp_path):
@@ -735,6 +848,92 @@ def test_plan_commit_basic(tmp_path):
     assert moves[aid].dst_path.name.startswith("20261015_143200_")
     assert moves[bid].dst_path.name.startswith("20261015_143205_")
     assert moves[aid].dst_path.suffix == ".jpg"
+
+
+def test_confirmed_ai_suggestion_is_in_commit_plan(tmp_path):
+    from curator import commit, db, scan
+    root = tmp_path / "photos"
+    root.mkdir()
+    save(make_scene(42), root / "suggested.jpg", "2026:10:15 14:32:00")
+    conn = db.connect(tmp_path / "suggestion.db")
+    scan.scan(root, conn)
+    photo_id = conn.execute("SELECT id FROM photos").fetchone()[0]
+    conn.execute(
+        "INSERT INTO photo_suggestions (photo_id, similarity, computed_at, dismissed_at) "
+        "VALUES (?, 0.91, '2026-10-15T15:00:00', '2026-10-15T15:01:00')",
+        (photo_id,),
+    )
+    conn.execute(
+        "UPDATE photos SET suggested_reject=1, user_reject=1, "
+        "rejected_reviewed_at='2026-10-15T15:01:00' WHERE id=?",
+        (photo_id,),
+    )
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.has_errors
+    assert len(plan.moves) == 1
+    assert plan.moves[0].role == "rejected"
+    assert plan.moves[0].source == "ai_suggested"
+
+    commit.execute_commit(plan, conn)
+    manifest = conn.execute(
+        "SELECT role, source FROM manifest WHERE photo_id=?", (photo_id,)
+    ).fetchone()
+    assert manifest["role"] == "rejected"
+    assert manifest["source"] == "ai_suggested"
+
+
+def test_done_page_reports_accepted_ai_assistance(tmp_path):
+    from curator import db, scan
+    from curator.web.app import create_app
+    root = tmp_path / "photos"
+    root.mkdir()
+    save(make_scene(1), root / "keeper.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "rejected.jpg", "2026:10:15 14:33:00")
+    conn = db.connect(tmp_path / "done.db")
+    scan.scan(root, conn)
+    photos = {
+        Path(row["path"]).name: row
+        for row in conn.execute("SELECT id, path, size FROM photos")
+    }
+    commit_id = "test-commit"
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES ('last_commit_id', ?)",
+        (commit_id,),
+    )
+    for name, role, source in (
+        ("keeper.jpg", "winner", "review"),
+        ("rejected.jpg", "rejected", "ai_suggested"),
+    ):
+        photo = photos[name]
+        conn.execute(
+            "INSERT INTO manifest(commit_id, photo_id, original_path, new_path, "
+            "role, source, size, moved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                commit_id, photo["id"], str(root / name),
+                str(root / "_curator" / name), role, source, photo["size"],
+                "2026-10-15T15:00:00",
+            ),
+        )
+    conn.execute(
+        "INSERT INTO group_feedback(group_key, photo_ids, winner_photo_id, "
+        "ai_assisted, active, created_at) VALUES ('group-key', ?, ?, 1, 1, ?)",
+        (
+            f'[{photos["keeper.jpg"]["id"]}]',
+            photos["keeper.jpg"]["id"],
+            "2026-10-15T15:00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    client = create_app(db_path=str(tmp_path / "done.db")).test_client()
+    response = client.get("/done")
+    assert response.status_code == 200
+    assert b"Your photos are organized." in response.data
+    assert b"Start again" in response.data
+    assert b"Space organized" not in response.data
 
 
 def test_plan_commit_uses_safe_editable_batch_name_and_unique_id(tmp_path):
@@ -1158,8 +1357,9 @@ def test_commit_endpoint_async(tmp_path):
     # Verify done page reachable
     r = client.get("/done")
     assert r.status_code == 200
-    assert b"Space organized" in r.data
-    assert b"available disk space is unchanged" in r.data
+    assert b"Your photos are organized." in r.data
+    assert b"Start again" in r.data
+    assert b"Undo everything" not in r.data
 
 
 # ---- Step 6a: smart grouping --------------------------------------------------------

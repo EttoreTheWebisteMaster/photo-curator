@@ -184,6 +184,20 @@
                         <span class="main__meta-hint main__meta-hint--mobile">Swipe to compare</span>
                     </div>
                 </header>
+                <template x-if="selectedDetail?.recommendation?.status === 'ready'">
+                    <aside class="keeper-suggestion" aria-label="Personalized keeper suggestion">
+                        <div>
+                            <strong>Keeper suggestion</strong>
+                            <span>Based on your confirmed picks. Your choice stays in control.</span>
+                        </div>
+                        <button type="button" class="keeper-suggestion__action"
+                                @click="applyRecommendation()"
+                                :disabled="selectedDetail.recommendation.photo_id === selectedDetail.current_winner">
+                            <span x-text="selectedDetail.recommendation.photo_id === selectedDetail.current_winner
+                                ? 'Already selected' : 'Use suggestion'"></span>
+                        </button>
+                    </aside>
+                </template>
 
                 <template x-if="comparisonPhotos.length === 0">
                     <div class="empty-state empty-state--sm">
@@ -206,13 +220,10 @@
                                 </span>
                             </button>
                             <footer class="photo-card__footer">
-                                <div class="photo-card__facts">
-                                    <span class="photo-card__name" x-text="photoLabel(photo)"></span>
-                                    <span class="photo-card__metrics">
-                                        <span>Sharpness <strong x-text="Math.round(photo.sharpness)"></strong></span>
-                                        <span>Exposure <strong x-text="Math.round(photo.exposure * 100) + '%'"></strong></span>
-                                    </span>
-                                </div>
+                                <template x-if="selectedDetail.recommendation?.status === 'ready'
+                                    && photo.id === selectedDetail.recommendation.photo_id">
+                                    <span class="photo-card__recommendation">Keeper suggestion</span>
+                                </template>
                                 <template x-if="photo.id === selectedDetail.current_winner">
                                     <span class="photo-card__selected-label" role="status">
                                         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -261,21 +272,6 @@
                         <img class="detail__img" :src="currentWinner.url" alt="">
                     </button>
                 </div>
-
-                <dl class="detail__meta">
-                    <div class="detail__meta-row">
-                        <dt>Sharpness</dt>
-                        <dd x-text="currentWinner.sharpness.toFixed(1)"></dd>
-                    </div>
-                    <div class="detail__meta-row">
-                        <dt>Exposure</dt>
-                        <dd x-text="Math.round(currentWinner.exposure * 100) + '%'"></dd>
-                    </div>
-                    <div class="detail__meta-row">
-                        <dt>ID</dt>
-                        <dd class="detail__meta-mono" x-text="currentWinner.id"></dd>
-                    </div>
-                </dl>
 
                 <footer class="detail__footer">
                     <button

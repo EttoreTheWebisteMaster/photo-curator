@@ -20,7 +20,8 @@ from .embeddings import load_embedding
 DEFAULT_THRESHOLD = 0.82
 
 
-def store_reject_centroids(conn, commit_id: str, model: str = "dinov2_vits14") -> int:
+def store_reject_centroids(conn, commit_id: str, model: str = "dinov2_vits14",
+                           *, commit: bool = True) -> int:
     """After a commit, store a centroid for every group the user deleted.
 
     Called from commit.execute_commit() on success. Skips groups without embeddings,
@@ -60,11 +61,13 @@ def store_reject_centroids(conn, commit_id: str, model: str = "dinov2_vits14") -
             (commit_id, model, len(centroid), centroid.tobytes(), len(vecs), now),
         )
         stored += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return stored
 
 
-def store_suggested_reject(conn, photo_id: int, model: str = "dinov2_vits14") -> bool:
+def store_suggested_reject(conn, photo_id: int, model: str = "dinov2_vits14",
+                           *, commit: bool = True) -> bool:
     """Store a confirmed rejection as a reject example.
 
     Also marks the photo as user_reject=1 so it does not get re-flagged as a
@@ -85,7 +88,8 @@ def store_suggested_reject(conn, photo_id: int, model: str = "dinov2_vits14") ->
         "UPDATE photos SET user_reject = 1, rejected_reviewed_at = ? WHERE id = ?",
         (now, photo_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return True
 
 
@@ -144,7 +148,7 @@ def flag_similar_to_rejects(conn, model: str = "dinov2_vits14",
     return flagged
 
 
-def dismiss_suggestion(conn, photo_id: int) -> bool:
+def dismiss_suggestion(conn, photo_id: int, *, commit: bool = True) -> bool:
     """User disagrees with the suggestion: photo goes back into groups next analysis."""
     now = datetime.now().isoformat(timespec="seconds")
     cur = conn.execute(
@@ -152,11 +156,13 @@ def dismiss_suggestion(conn, photo_id: int) -> bool:
         (now, photo_id),
     )
     conn.execute("UPDATE photos SET suggested_reject = 0 WHERE id = ?", (photo_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
-def confirm_suggestion(conn, photo_id: int, model: str = "dinov2_vits14") -> bool:
+def confirm_suggestion(conn, photo_id: int, model: str = "dinov2_vits14",
+                       *, commit: bool = True) -> bool:
     """User agrees: mark user_reject, store photo as a reject example."""
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
@@ -167,6 +173,7 @@ def confirm_suggestion(conn, photo_id: int, model: str = "dinov2_vits14") -> boo
         "UPDATE photo_suggestions SET dismissed_at = ? WHERE photo_id = ?",
         (now, photo_id),
     )
-    conn.commit()
-    store_suggested_reject(conn, photo_id, model)
+    store_suggested_reject(conn, photo_id, model, commit=commit)
+    if commit:
+        conn.commit()
     return True

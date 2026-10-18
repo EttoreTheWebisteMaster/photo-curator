@@ -8,7 +8,7 @@
     {% include "product_bar.html" %}
     <aside class="sidebar" aria-label="Rejected">
         <header class="sidebar__header">
-            <div class="sidebar__label">System rejects</div>
+            <div class="sidebar__label">Suggested for review</div>
             <div x-show="photos.length > 0" class="sidebar__counter">
                 <span class="sidebar__counter-value" x-text="photos.length"></span>
                 <span class="sidebar__counter-label">to review</span>
@@ -21,8 +21,7 @@
         </header>
         <div class="sidebar__list" style="padding: var(--space-4);">
             <p style="color: var(--text-tertiary); font-size: 12px; line-height: 1.6;">
-                The system marked these photos as <strong style="color: var(--text-secondary);">screenshots, documents or exact duplicates</strong>.
-                Review them before continuing. Nothing has been moved.
+                Review system flags and visual matches to past rejects. A suggestion is not a decision.
             </p>
         </div>
     </aside>
@@ -55,7 +54,7 @@
                     </div>
                     <div class="main__meta">
                         <button type="button" class="btn btn--ghost" @click="acceptAll()" style="width: auto;">
-                            Accept all
+                            Confirm all as rejected
                         </button>
                     </div>
                 </header>

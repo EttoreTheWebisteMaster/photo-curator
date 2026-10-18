@@ -14,6 +14,7 @@ from datetime import datetime
 import uuid
 
 from .embeddings import load_embedding
+from .ranker import group_key
 
 
 def hamming(a: str, b: str) -> int:
@@ -23,6 +24,7 @@ def hamming(a: str, b: str) -> int:
 class _UnionFind:
     def __init__(self, n: int):
         self.parent = list(range(n))
+        self.anchor = list(range(n))
 
     def find(self, x: int) -> int:
         while self.parent[x] != x:
@@ -30,10 +32,16 @@ class _UnionFind:
             x = self.parent[x]
         return x
 
-    def union(self, a: int, b: int) -> None:
+    def union_if_anchors_match(
+        self, a: int, b: int, similar: Callable[[int, int], bool],
+    ) -> None:
         ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self.parent[rb] = ra
+        if ra == rb:
+            return
+        anchor_a, anchor_b = self.anchor[ra], self.anchor[rb]
+        if not similar(anchor_a, anchor_b):
+            return
+        self.parent[rb] = ra
 
 
 def _time_adaptive_cosine_threshold(dt_seconds: float) -> float:
@@ -137,7 +145,6 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
             sessions.append([])
         sessions[-1].append(i)
         last_t = t
-
     unknown_by_day: dict[str, list[int]] = {}
     known_by_day: dict[str, list[int]] = {}
     for i, r in enumerate(rows):
@@ -159,7 +166,7 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
         for a in range(len(sess)):
             for b in range(a + 1, len(sess)):
                 if similar(sess[a], sess[b]):
-                    uf.union(sess[a], sess[b])
+                    uf.union_if_anchors_match(sess[a], sess[b], similar)
                 compared += 1
                 if progress and (
                     compared % progress_step == 0 or compared == total_pairs
@@ -170,7 +177,7 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
             for j in unknown + known_by_day.get(day, []):
                 if j != i:
                     if similar(i, j):
-                        uf.union(i, j)
+                        uf.union_if_anchors_match(i, j, similar)
                     compared += 1
                     if progress and (
                         compared % progress_step == 0 or compared == total_pairs
@@ -215,24 +222,48 @@ def build_groups(conn, *, session_gap_min: float = 30.0,
         progress=progress,
     )
     run_id = uuid.uuid4().hex[:8]
+    previous_states = {}
+    previous_rows = conn.execute(
+        "SELECT gs.group_id, gs.status, gs.current_winner_photo_id, "
+        "GROUP_CONCAT(g.photo_id) AS photo_ids "
+        "FROM group_states gs JOIN groups g ON g.group_id = gs.group_id "
+        "GROUP BY gs.group_id"
+    ).fetchall()
+    for row in previous_rows:
+        ids = [int(pid) for pid in row["photo_ids"].split(",")]
+        previous_states[group_key(ids)] = dict(row)
+
     conn.execute("DELETE FROM groups")
     conn.executemany(
         "INSERT INTO groups (photo_id, group_id, run_id) VALUES (?,?,?)",
         [(pid, gid, run_id) for pid, gid in assignments],
     )
 
-    # Step 3: rebuild group_states. Regenerating groups invalidates prior decisions.
-    # `assignments` is already ordered by (taken_at, id), so the first entry per
-    # group_id is the deterministic default winner.
+    # Keep decisions only when the exact same set of photo IDs remains together.
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute("DELETE FROM group_states")
     first_by_group: dict[int, int] = {}
+    ids_by_group: dict[int, list[int]] = {}
     for pid, gid in assignments:
         first_by_group.setdefault(gid, pid)
+        ids_by_group.setdefault(gid, []).append(pid)
+    state_rows = []
+    for gid, default_winner in sorted(first_by_group.items()):
+        ids = ids_by_group[gid]
+        key = group_key(ids)
+        previous = previous_states.get(key)
+        winner = (
+            previous["current_winner_photo_id"]
+            if previous and previous["current_winner_photo_id"] in ids
+            else default_winner
+        )
+        status = previous["status"] if previous else "pending"
+        state_rows.append((gid, key, status, winner, now))
     conn.executemany(
-        "INSERT INTO group_states (group_id, status, current_winner_photo_id, updated_at) "
-        "VALUES (?, 'pending', ?, ?)",
-        [(gid, pid, now) for gid, pid in sorted(first_by_group.items())],
+        "INSERT INTO group_states "
+        "(group_id, group_key, status, current_winner_photo_id, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        state_rows,
     )
     conn.commit()
     return {"run_id": run_id, **meta}

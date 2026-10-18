@@ -184,7 +184,11 @@ def analyse(path: Path, mtime: float) -> dict:
         is_utility = 1 if detect_utility(path, img) else 0
         img = img.convert("RGB")
         img.thumbnail((ANALYSIS_MAX_SIDE, ANALYSIS_MAX_SIDE))
+        rgb = np.asarray(img)
         gray = np.asarray(img.convert("L"))
+        gray_unit = gray.astype(np.float32) / 255.0
+        shadow_clipped = np.all(rgb <= 5, axis=-1)
+        highlight_clipped = np.any(rgb >= 250, axis=-1)
         return {
             "width": width,
             "height": height,
@@ -193,6 +197,9 @@ def analyse(path: Path, mtime: float) -> dict:
             "time_known": int(time_known),
             "phash": str(imagehash.phash(img)),
             "sharpness": laplacian_variance(gray),
+            "brightness": float(gray_unit.mean()),
+            "shadow_clip": float(shadow_clipped.mean()),
+            "highlight_clip": float(highlight_clipped.mean()),
             "is_utility": is_utility,
         }
 
@@ -214,7 +221,8 @@ def scan(root: Path, conn, progress=None, force: bool = False, stop_event=None) 
         stats["seen"] += 1
         st = path.stat()
         row = conn.execute(
-            "SELECT id, size, mtime, error, time_known FROM photos WHERE path = ?", (str(path),)
+            "SELECT id, size, mtime, error, time_known, brightness, shadow_clip, "
+            "highlight_clip FROM photos WHERE path = ?", (str(path),)
         ).fetchone()
         unchanged = (
             row is not None
@@ -222,6 +230,9 @@ def scan(root: Path, conn, progress=None, force: bool = False, stop_event=None) 
             and row["mtime"] == st.st_mtime
             and not row["error"]
             and row["time_known"] is not None
+            and row["brightness"] is not None
+            and row["shadow_clip"] is not None
+            and row["highlight_clip"] is not None
         )
         if unchanged and not force:
             stats["skipped"] += 1
@@ -231,9 +242,12 @@ def scan(root: Path, conn, progress=None, force: bool = False, stop_event=None) 
             data["sha256"] = sha256_file(path)
             data["error"] = None
         except Exception as exc:  # corrupt file or unreadable format
-            data = {"sha256": None, "width": None, "height": None, "taken_at": None,
-                    "taken_source": None, "time_known": None, "phash": None, "sharpness": None,
-                    "error": f"{type(exc).__name__}: {exc}"}
+            data = {
+                "sha256": None, "width": None, "height": None, "taken_at": None,
+                "taken_source": None, "time_known": None, "phash": None,
+                "sharpness": None, "brightness": None, "shadow_clip": None,
+                "highlight_clip": None, "error": f"{type(exc).__name__}: {exc}",
+            }
             stats["errors"] += 1
         data.update(path=str(path), size=st.st_size, mtime=st.st_mtime, scanned_at=now)
         cols = list(data)

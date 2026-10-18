@@ -56,6 +56,7 @@ class Move:
     photo_id: int | None         # None for the .MOV companion
     companion_of: int | None     # photo_id of the still, when this is the .MOV
     sha256_expected: str | None  # from DB for the still; None for the companion
+    source: str = "review"
 
 
 @dataclass
@@ -114,7 +115,7 @@ def _existing_max_per_day(curator_root: Path) -> dict[str, int]:
     return out
 
 
-def _collect_candidates(conn, source_root: Path) -> tuple[list[tuple[dict, str]], list[str]]:
+def _collect_candidates(conn, source_root: Path) -> tuple[list[tuple[dict, str, str]], list[str]]:
     errors: list[str] = []
 
     pending = conn.execute(
@@ -162,16 +163,24 @@ def _collect_candidates(conn, source_root: Path) -> tuple[list[tuple[dict, str]]
     ).fetchall()
 
     seen: set[int] = set()
-    candidates: list[tuple[dict, str]] = []
-    for row, role in ([(r, "winner") for r in winners]
-                      + [(r, "rejected") for r in losers]
-                      + [(r, "rejected") for r in utility_rejected]):
+    ai_rejected = conn.execute(
+        "SELECT * FROM photos WHERE error IS NULL AND committed_at IS NULL "
+        "AND COALESCE(user_reject, 0) = 1"
+    ).fetchall()
+
+    candidates: list[tuple[dict, str, str]] = []
+    for row, role, source in (
+        [(r, "winner", "review") for r in winners]
+        + [(r, "rejected", "review") for r in losers]
+        + [(r, "rejected", "system") for r in utility_rejected]
+        + [(r, "rejected", "ai_suggested") for r in ai_rejected]
+    ):
         if row["id"] in seen:
             continue
         if not _is_under(row["path"], source_root):
             continue
         seen.add(row["id"])
-        candidates.append((dict(row), role))
+        candidates.append((dict(row), role, source))
     return candidates, errors
 
 
@@ -184,14 +193,14 @@ def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> Commi
 
     candidates, errors = _collect_candidates(conn, source_root)
 
-    by_day: dict[str, list[tuple[dict, str]]] = {}
-    for row, role in candidates:
+    by_day: dict[str, list[tuple[dict, str, str]]] = {}
+    for row, role, source in candidates:
         taken = row["taken_at"] or ""
         day = taken[:10].replace("-", "")
         if len(day) != 8 or not day.isdigit():
             errors.append(f"photo {row['id']} has no valid taken_at")
             continue
-        by_day.setdefault(day, []).append((row, role))
+        by_day.setdefault(day, []).append((row, role, source))
 
     existing = _existing_max_per_day(curator_root)
 
@@ -201,7 +210,7 @@ def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> Commi
         photos.sort(key=lambda x: (0 if x[1] == "winner" else 1,
                                    x[0]["taken_at"] or "",
                                    x[0]["id"]))
-        for row, role in photos:
+        for row, role, source in photos:
             pid = row["id"]
             src = Path(row["path"])
             if not src.exists():
@@ -226,6 +235,7 @@ def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> Commi
                 src_path=src, dst_path=dst, role=role,
                 photo_id=pid, companion_of=None,
                 sha256_expected=row["sha256"],
+                source=source,
             ))
 
             companion = _find_companion(src)
@@ -235,6 +245,7 @@ def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> Commi
                     dst_path=dst_dir / (stem + companion.suffix),
                     role=role, photo_id=None, companion_of=pid,
                     sha256_expected=None,
+                    source=source,
                 ))
 
             next_nnn += 1
@@ -246,18 +257,52 @@ def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> Commi
         seen_dst.add(m.dst_path)
 
     total_size = 0
+    winner_size = 0
+    rejected_size = 0
+    winner_photos = 0
+    rejected_photos = 0
+    ai_suggested_count = 0
     for m in moves:
         try:
-            total_size += m.src_path.stat().st_size
+            size = m.src_path.stat().st_size
         except OSError:
-            pass
+            continue
+        total_size += size
+        if m.role == "winner":
+            winner_size += size
+        else:
+            rejected_size += size
+        if m.photo_id is not None:
+            if m.role == "winner":
+                winner_photos += 1
+            else:
+                rejected_photos += 1
+                if m.source == "ai_suggested":
+                    ai_suggested_count += 1
+
+    winner_ids = [m.photo_id for m in moves if m.role == "winner" and m.photo_id is not None]
+    ai_keeper_picks = 0
+    if winner_ids:
+        placeholders = ",".join("?" for _ in winner_ids)
+        ai_keeper_picks = conn.execute(
+            "SELECT COUNT(DISTINCT group_key) FROM group_feedback "
+            "WHERE active = 1 AND ai_assisted = 1 "
+            f"AND winner_photo_id IN ({placeholders})",
+            winner_ids,
+        ).fetchone()[0]
 
     stats = {
         "winner": sum(1 for m in moves if m.role == "winner"),
         "rejected": sum(1 for m in moves if m.role == "rejected"),
+        "winner_photos": winner_photos,
+        "rejected_photos": rejected_photos,
         "companion": sum(1 for m in moves if m.companion_of is not None),
         "total_moves": len(moves),
         "total_size": total_size,
+        "winner_size": winner_size,
+        "rejected_size": rejected_size,
+        "ai_suggested_count": ai_suggested_count,
+        "ai_keeper_picks": ai_keeper_picks,
         "curator_root": str(curator_root),
         "source_root": str(source_root),
     }
@@ -338,7 +383,7 @@ def execute_commit(plan: CommitPlan, conn, progress=None) -> dict:
             manifest_rows.append((
                 commit_id, move.photo_id, move.companion_of,
                 str(move.src_path), str(move.dst_path),
-                sha_before, sha_after, move.role, size, now,
+                sha_before, sha_after, move.role, move.source, size, now,
             ))
 
             if progress:
@@ -349,8 +394,8 @@ def execute_commit(plan: CommitPlan, conn, progress=None) -> dict:
             conn.execute("BEGIN")
             conn.executemany(
                 "INSERT INTO manifest (commit_id, photo_id, companion_of, "
-                "original_path, new_path, sha256_before, sha256_after, role, size, moved_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "original_path, new_path, sha256_before, sha256_after, role, source, size, moved_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 manifest_rows,
             )
             photo_ids = [m.photo_id for m in plan.moves if m.photo_id is not None]
@@ -359,12 +404,9 @@ def execute_commit(plan: CommitPlan, conn, progress=None) -> dict:
                     "UPDATE photos SET committed_at = ? WHERE id = ?",
                     [(now, pid) for pid in photo_ids],
                 )
+            from .learning import store_reject_centroids
+            store_reject_centroids(conn, commit_id, commit=False)
             conn.commit()
-            try:
-                from .learning import store_reject_centroids
-                store_reject_centroids(conn, commit_id)
-            except Exception:
-                pass  # learning is best-effort; never block a successful commit
         except Exception:
             conn.rollback()
             raise

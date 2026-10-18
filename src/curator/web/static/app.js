@@ -193,6 +193,13 @@ function curatorApp() {
             return true;
         },
 
+        async applyRecommendation() {
+            const photoId = this.selectedDetail?.recommendation?.photo_id;
+            if (photoId == null || photoId === this.selectedDetail?.current_winner) return;
+            const applied = await this.promotePhoto(photoId);
+            if (applied) this.toast('Keeper suggestion selected. You can change it any time.', null, null);
+        },
+
         async selectFromLightbox(photoId) {
             const d = this.selectedDetail;
             const photo = d?.photos.find(candidate => candidate.id === photoId);
@@ -737,17 +744,20 @@ function rejectedApp() {
         undoStack: [],
 
         async load() {
-            await this.refresh();
+            try {
+                await this.refresh();
+            } catch {
+                this.toast('Could not load the review queue. Try refreshing.', null, null);
+            }
         },
 
         async refresh() {
-            try {
-                const r = await fetch('/api/rejected');
-                const data = await r.json();
-                this.photos = data.photos;
-                this.reviewedCount = data.reviewed;
-                this.totalCount = data.total;
-            } catch {}
+            const r = await fetch('/api/rejected');
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            this.photos = data.photos;
+            this.reviewedCount = data.reviewed;
+            this.totalCount = data.total;
         },
 
         get reviewProgressPct() {
@@ -762,15 +772,17 @@ function rejectedApp() {
             this.photos.splice(idx, 1);
             this.reviewedCount++;
             try {
-                await fetch(`/api/rejected/${photoId}/keep`, { method: 'POST' });
-                this.pushUndo(() => {
-                    this.photos.splice(idx, 0, photo);
-                    this.reviewedCount--;
+                const response = await fetch(`/api/rejected/${photoId}/keep`, { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                this.pushUndo(async () => {
+                    await this.undoFeedback(data.feedback_id);
+                    await this.refresh();
                 });
-            } catch {
+            } catch (error) {
                 this.photos.splice(idx, 0, photo);
                 this.reviewedCount--;
-                this.toast('Could not save', null, null);
+                this.toast(error.message || 'Could not save this choice', null, null);
             }
         },
 
@@ -781,15 +793,17 @@ function rejectedApp() {
             this.photos.splice(idx, 1);
             this.reviewedCount++;
             try {
-                await fetch(`/api/rejected/${photoId}/reject`, { method: 'POST' });
-                this.pushUndo(() => {
-                    this.photos.splice(idx, 0, photo);
-                    this.reviewedCount--;
+                const response = await fetch(`/api/rejected/${photoId}/reject`, { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                this.pushUndo(async () => {
+                    await this.undoFeedback(data.feedback_id);
+                    await this.refresh();
                 });
-            } catch {
+            } catch (error) {
                 this.photos.splice(idx, 0, photo);
                 this.reviewedCount--;
-                this.toast('Could not save', null, null);
+                this.toast(error.message || 'Could not save this choice', null, null);
             }
         },
 
@@ -801,17 +815,25 @@ function rejectedApp() {
             try {
                 const r = await fetch('/api/rejected/accept-all', { method: 'POST' });
                 const data = await r.json();
+                if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
                 this.pushUndo(async () => {
-                    // Restore by hitting the reject endpoint inverted; here we just reload
-                    // because bulk undo needs a dedicated endpoint. Reload is honest.
+                    for (const id of (data.feedback_ids || []).reverse()) {
+                        await this.undoFeedback(id);
+                    }
                     await this.refresh();
                 });
-                this.toast(`Accepted ${data.count} rejected photos`, 'Undo', () => this.refresh());
-            } catch {
+                this.toast(`Confirmed ${data.count} photos as rejected`, 'Undo', () => this.undo());
+            } catch (error) {
                 this.photos = snapshot;
                 this.reviewedCount -= snapshot.length;
-                this.toast('Could not save', null, null);
+                this.toast(error.message || 'Could not save these choices', null, null);
             }
+        },
+
+        async undoFeedback(feedbackId) {
+            const response = await fetch(`/api/feedback/${feedbackId}/undo`, { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         },
 
         openLightbox(photoId) {
@@ -828,8 +850,12 @@ function rejectedApp() {
         async undo() {
             const fn = this.undoStack.pop();
             if (!fn) return;
-            await fn();
-            this.toast('Undone', null, null);
+            try {
+                await fn();
+                this.toast('Undone', null, null);
+            } catch (error) {
+                this.toast(error.message || 'Could not undo this choice', null, null);
+            }
         },
 
         onKey(e) {
@@ -951,9 +977,13 @@ function confirmApp() {
             }
         },
 
-        percentage(count) {
-            const total = this.data.stats?.total_moves || 0;
-            return `${total ? Math.round((count / total) * 100) : 0}%`;
+        photoCount() {
+            return (Number(this.data.stats?.winner_photos) || 0)
+                + (Number(this.data.stats?.rejected_photos) || 0);
+        },
+
+        formatCount(count) {
+            return new Intl.NumberFormat().format(Number(count) || 0);
         },
 
         execute() {
@@ -1035,113 +1065,6 @@ function confirmApp() {
             }
             this.$refs.toasts.appendChild(el);
             el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 1800);
-        },
-        dismissToast(el) {
-            if (!el || !el.parentNode) return;
-            clearTimeout(el._timeout);
-            el.classList.add('toast--out');
-            setTimeout(() => el.remove(), 200);
-        },
-    };
-}
-
-function doneApp() {
-    return {
-        commit_id: null,
-        stats: {},
-        undoing: false,
-
-        init() {
-            const data = JSON.parse(document.getElementById('initial-data').textContent);
-            this.commit_id = data.commit_id;
-            this.stats = data.stats || {};
-        },
-
-        totalCount() {
-            return ['winner', 'rejected'].reduce(
-                (total, role) => total + (Number(this.stats[role]?.count) || 0),
-                0
-            );
-        },
-
-        totalBytes() {
-            return ['winner', 'rejected'].reduce(
-                (total, role) => total + (Number(this.stats[role]?.bytes) || 0),
-                0
-            );
-        },
-
-        organizedSummary() {
-            const count = this.totalCount();
-            return `${this.formatCount(count)} ${count === 1 ? 'file is' : 'files are'} now organized.`;
-        },
-
-        formatCount(count) {
-            return new Intl.NumberFormat().format(Number(count) || 0);
-        },
-
-        async openFolder() {
-            try {
-                const r = await fetch('/api/open-folder', { method: 'POST' });
-                const data = await r.json();
-                if (data.error) this.toast(data.error, null, null);
-            } catch {
-                this.toast('Could not open folder', null, null);
-            }
-        },
-
-        async undoEverything() {
-            if (this.undoing) return;
-            this.undoing = true;
-            try {
-                const r = await fetch('/api/commit/undo', { method: 'POST' });
-                const data = await r.json();
-                if (data.error) {
-                    this.toast(data.error, null, null);
-                    this.undoing = false;
-                    return;
-                }
-                const restored = data.restored || 0;
-                const missing = (data.missing || []).length;
-                if (missing > 0) {
-                    this.toast(
-                        `Restored ${restored} files · ${missing} could not be restored`,
-                        null, null
-                    );
-                    setTimeout(() => { window.location = '/'; }, 2500);
-                } else {
-                    this.toast(`Restored ${restored} files`, null, null);
-                    setTimeout(() => { window.location = '/'; }, 1200);
-                }
-            } catch {
-                this.toast('Could not undo', null, null);
-                this.undoing = false;
-            }
-        },
-
-        formatSize(bytes) {
-            if (!bytes) return '0 B';
-            const units = ['B', 'KB', 'MB', 'GB'];
-            let i = 0, v = bytes;
-            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-            return v.toFixed(v < 10 ? 1 : 0) + ' ' + units[i];
-        },
-
-        toast(text, actionLabel, onAction) {
-            this.$refs.toasts.querySelectorAll('.toast').forEach(t => this.dismissToast(t));
-            const el = document.createElement('div');
-            el.className = 'toast';
-            const txt = document.createElement('span');
-            txt.className = 'toast__text'; txt.textContent = text;
-            el.appendChild(txt);
-            if (actionLabel) {
-                const btn = document.createElement('button');
-                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
-                btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
-                el.appendChild(btn);
-            }
-            this.$refs.toasts.appendChild(el);
-            el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 2200);
         },
         dismissToast(el) {
             if (!el || !el.parentNode) return;

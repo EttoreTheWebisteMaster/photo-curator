@@ -11,6 +11,7 @@ Sprint 3b adds:
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 import threading
@@ -19,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from curator import embeddings as embedmod
 from curator import group as groupmod
+from curator import ranker as rankermod
 
 from flask import (
     Blueprint, abort, current_app, g, jsonify,
@@ -34,7 +36,7 @@ REVIEW_COMPLETED_KEY = "review_completed"
 
 # Bump when the grouping logic or filters change, so previously-analyzed
 # folders get re-grouped on the next `/api/analyze` run even if files are unchanged.
-GROUPING_VERSION = "3"
+GROUPING_VERSION = "5"
 
 bp = Blueprint(
     "web",
@@ -154,8 +156,13 @@ def _photo_payload(row) -> dict:
         "id": row["id"],
         "thumb": _photo_url(row["id"], row["mtime"], row["size"], "thumb"),
         "url": _photo_url(row["id"], row["mtime"], row["size"], "full"),
-        "sharpness": row["sharpness"] or 0.0,
-        "exposure": 0.85,
+        "sharpness": row["sharpness"],
+        "brightness": row["brightness"],
+        "shadow_clip": row["shadow_clip"],
+        "highlight_clip": row["highlight_clip"],
+        "width": row["width"],
+        "height": row["height"],
+        "duplicate_of": row["duplicate_of"],
     }
 
 
@@ -207,12 +214,17 @@ def _load_group_detail(conn, group_id: int) -> dict | None:
         "WHERE g.group_id = ? AND p.error IS NULL ORDER BY p.id",
         (group_id,),
     ).fetchall()
-    return {
+    result = {
         "id": group_id,
         "status": state["status"],
         "current_winner": state["current_winner_photo_id"],
         "photos": [_photo_payload(p) for p in photos],
     }
+    if state["status"] == "pending" and len(photos) > 1:
+        result["recommendation"] = rankermod.recommend_keeper(conn, photos)
+    else:
+        result["recommendation"] = {"status": "not_applicable"}
+    return result
 
 
 # ---- Pages --------------------------------------------------------------------------
@@ -270,6 +282,7 @@ def index():
             "WHERE ps.dismissed_at IS NULL AND p.error IS NULL "
             "  AND p.committed_at IS NULL"
         ).fetchone()[0]
+        rejected_count += suggested_count
 
         return render_template(
             "index.html", groups=groups, pending_count=pending,
@@ -290,6 +303,10 @@ def index():
     rejected_left = conn.execute(
         "SELECT COUNT(*) FROM photos WHERE error IS NULL AND committed_at IS NULL "
         "  AND rejected_reviewed_at IS NULL AND COALESCE(is_utility,0)=1"
+    ).fetchone()[0]
+    rejected_left += conn.execute(
+        "SELECT COUNT(*) FROM photo_suggestions ps JOIN photos p ON p.id=ps.photo_id "
+        "WHERE ps.dismissed_at IS NULL AND p.error IS NULL AND p.committed_at IS NULL"
     ).fetchone()[0]
     if rejected_left > 0:
         return redirect(url_for("web.rejected"))
@@ -689,6 +706,34 @@ def _sync_winner_label(conn, group_id: int, photo_id: int) -> None:
     )
 
 
+def _record_user_feedback(conn, photo_id: int, source: str, label: str, previous) -> int:
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        "INSERT INTO user_feedback "
+        "(photo_id, source, label, previous_is_utility, previous_duplicate_of, "
+        "previous_reviewed_at, previous_user_reject, previous_suggested_reject, "
+        "previous_dismissed_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            photo_id, source, label, previous["is_utility"], previous["duplicate_of"],
+            previous["rejected_reviewed_at"], previous["user_reject"],
+            previous["suggested_reject"], previous["dismissed_at"], now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _feedback_photo(conn, photo_id: int):
+    return conn.execute(
+        "SELECT p.id, p.is_utility, p.duplicate_of, p.rejected_reviewed_at, "
+        "p.user_reject, p.suggested_reject, ps.dismissed_at, "
+        "CASE WHEN ps.photo_id IS NULL THEN 0 ELSE 1 END AS has_suggestion "
+        "FROM photos p LEFT JOIN photo_suggestions ps ON ps.photo_id = p.id "
+        "WHERE p.id = ?",
+        (photo_id,),
+    ).fetchone()
+
+
 @bp.route("/api/groups/<int:group_id>/choose", methods=["POST"])
 def api_choose(group_id: int):
     data = request.get_json(silent=True) or {}
@@ -699,6 +744,13 @@ def api_choose(group_id: int):
         return jsonify({"ok": True, "group_id": group_id,
                         "photo_id": photo_id, "status": "pending"})
     conn = get_db()
+    state = conn.execute(
+        "SELECT status FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if state is None:
+        return jsonify({"error": "group no longer exists"}), 404
+    if state["status"] == "deleted":
+        return jsonify({"error": "group is removed from review"}), 409
     belongs = conn.execute(
         "SELECT 1 FROM groups WHERE group_id = ? AND photo_id = ?", (group_id, photo_id)
     ).fetchone()
@@ -727,12 +779,43 @@ def api_confirm(group_id: int):
     ).fetchone()
     if row is None:
         return jsonify({"error": "not found"}), 404
+    status = conn.execute(
+        "SELECT status FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if status["status"] == "deleted":
+        return jsonify({"error": "restore this group before confirming it"}), 409
     if row["current_winner_photo_id"] is None:
         return jsonify({"error": "no winner chosen"}), 400
+    members = [
+        r["photo_id"] for r in conn.execute(
+            "SELECT photo_id FROM groups WHERE group_id = ? ORDER BY photo_id",
+            (group_id,),
+        )
+    ]
+    state = conn.execute(
+        "SELECT group_key FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    key = state["group_key"] if state and state["group_key"] else rankermod.group_key(members)
+    photos = conn.execute(
+        "SELECT p.* FROM groups g JOIN photos p ON p.id = g.photo_id "
+        "WHERE g.group_id = ? AND p.error IS NULL ORDER BY p.id",
+        (group_id,),
+    ).fetchall()
+    recommendation = rankermod.recommend_keeper(conn, photos) if len(photos) > 1 else {}
+    ai_assisted = int(recommendation.get("photo_id") == row["current_winner_photo_id"])
     conn.execute(
         "UPDATE group_states SET status = 'completed', decided_at = ?, updated_at = ? "
         "WHERE group_id = ?",
         (now, now, group_id),
+    )
+    conn.execute(
+        "INSERT INTO group_feedback "
+        "(group_key, photo_ids, winner_photo_id, ai_assisted, active, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?) "
+        "ON CONFLICT(group_key) DO UPDATE SET photo_ids=excluded.photo_ids, "
+        "winner_photo_id=excluded.winner_photo_id, ai_assisted=excluded.ai_assisted, "
+        "active=1, created_at=excluded.created_at",
+        (key, json.dumps(members), row["current_winner_photo_id"], ai_assisted, now),
     )
     conn.commit()
     return jsonify({"ok": True, "group_id": group_id, "status": "completed"})
@@ -743,12 +826,23 @@ def api_delete(group_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True, "group_id": group_id, "status": "deleted"})
     conn = get_db()
+    state = conn.execute(
+        "SELECT status FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if state is None:
+        return jsonify({"error": "group no longer exists"}), 404
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         "UPDATE group_states SET status = 'deleted', decided_at = ?, updated_at = ? "
         "WHERE group_id = ?",
         (now, now, group_id),
     )
+    key_row = conn.execute(
+        "SELECT group_key FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if key_row and key_row["group_key"]:
+        conn.execute("UPDATE group_feedback SET active = 0 WHERE group_key = ?",
+                     (key_row["group_key"],))
     conn.execute("DELETE FROM labels WHERE group_id = ? AND label = 'winner'", (group_id,))
     conn.commit()
     return jsonify({"ok": True, "group_id": group_id, "status": "deleted"})
@@ -759,12 +853,23 @@ def api_restore(group_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True, "group_id": group_id, "status": "pending"})
     conn = get_db()
+    state = conn.execute(
+        "SELECT status FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if state is None:
+        return jsonify({"error": "group no longer exists"}), 404
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         "UPDATE group_states SET status = 'pending', decided_at = NULL, updated_at = ? "
         "WHERE group_id = ?",
         (now, group_id),
     )
+    key_row = conn.execute(
+        "SELECT group_key FROM group_states WHERE group_id = ?", (group_id,)
+    ).fetchone()
+    if key_row and key_row["group_key"]:
+        conn.execute("UPDATE group_feedback SET active = 0 WHERE group_key = ?",
+                     (key_row["group_key"],))
     conn.execute("DELETE FROM labels WHERE group_id = ? AND label = 'winner'", (group_id,))
     conn.commit()
     return jsonify({"ok": True, "group_id": group_id, "status": "pending"})
@@ -777,20 +882,75 @@ def _load_rejected(conn, unreviewed_only: bool = True) -> list[dict]:
     where = "p.error IS NULL AND COALESCE(p.is_utility,0)=1"
     if unreviewed_only:
         where += " AND p.rejected_reviewed_at IS NULL"
-    rows = conn.execute(
-        f"SELECT p.* FROM photos p WHERE {where} ORDER BY p.id"
-    ).fetchall()
-    return [
+    rows = conn.execute(f"SELECT p.* FROM photos p WHERE {where}",).fetchall()
+    result = [
         {
             "id": r["id"],
             "thumb": _photo_url(r["id"], r["mtime"], r["size"], "thumb"),
             "url": _photo_url(r["id"], r["mtime"], r["size"], "full"),
-            "reason": "Screenshot or document",
+            "reason": "Screenshot",
             "reason_detail": None,
+            "source": "system",
             "taken_at": r["taken_at"],
         }
         for r in rows
     ]
+    suggested_where = "ps.dismissed_at IS NULL AND p.error IS NULL"
+    if unreviewed_only:
+        suggested_where += " AND p.committed_at IS NULL"
+    suggestions = conn.execute(
+        "SELECT p.id, p.size, p.mtime, p.taken_at "
+        "FROM photo_suggestions ps JOIN photos p ON p.id = ps.photo_id "
+        f"WHERE {suggested_where} ORDER BY ps.similarity DESC"
+    ).fetchall()
+    suggestion_order = rankermod.rank_explicit_discard_candidates(
+        conn, [r["id"] for r in suggestions]
+    )
+    if suggestion_order["status"] == "ready":
+        positions = {
+            photo_id: index
+            for index, photo_id in enumerate(suggestion_order["photo_ids"])
+        }
+        suggestions = sorted(suggestions, key=lambda row: positions.get(row["id"], len(positions)))
+    suggestion_detail = (
+        "A visual match, prioritized by your explicit keep/reject choices. Not a verdict."
+        if suggestion_order["status"] == "ready"
+        else "A visual match, not a prediction of your decision."
+    )
+    result.extend(
+        {
+            "id": r["id"],
+            "thumb": _photo_url(r["id"], r["mtime"], r["size"], "thumb"),
+            "url": _photo_url(r["id"], r["mtime"], r["size"], "full"),
+            "reason": "Similar to past rejects",
+            "reason_detail": suggestion_detail,
+            "source": "suggested",
+            "taken_at": r["taken_at"],
+        }
+        for r in suggestions
+    )
+    unique = {}
+    for photo in result:
+        unique[photo["id"]] = photo
+    return list(unique.values())
+
+
+def _rejected_progress(conn) -> tuple[int, int]:
+    candidates = {
+        row[0] for row in conn.execute(
+            "SELECT id FROM photos WHERE COALESCE(is_utility,0)=1 "
+            "UNION SELECT photo_id FROM photo_suggestions "
+            "UNION SELECT photo_id FROM user_feedback"
+        )
+    }
+    reviewed = {
+        row[0] for row in conn.execute(
+            "SELECT id FROM photos WHERE rejected_reviewed_at IS NOT NULL "
+            "UNION SELECT photo_id FROM photo_suggestions WHERE dismissed_at IS NOT NULL "
+            "UNION SELECT photo_id FROM user_feedback WHERE active=1"
+        )
+    }
+    return len(candidates), len(candidates & reviewed)
 
 
 @bp.route("/rejected")
@@ -799,10 +959,7 @@ def rejected():
         return redirect(url_for("web.index"))
 
     conn = get_db()
-    remaining = conn.execute(
-        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND rejected_reviewed_at IS NULL "
-        "  AND COALESCE(is_utility,0)=1"
-    ).fetchone()[0]
+    remaining = len(_load_rejected(conn, unreviewed_only=True))
     return render_template("rejected.html", remaining=remaining)
 
 
@@ -812,13 +969,10 @@ def api_rejected():
         return jsonify({"photos": [], "reviewed": 0, "total": 0})
     conn = get_db()
     photos = _load_rejected(conn, unreviewed_only=True)
-    reviewed = conn.execute(
-        "SELECT COUNT(*) FROM photos WHERE rejected_reviewed_at IS NOT NULL"
-    ).fetchone()[0]
-    total = conn.execute(
-        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND COALESCE(is_utility,0)=1"
-    ).fetchone()[0]
-    return jsonify({"photos": photos, "reviewed": reviewed, "total": total})
+    total, reviewed = _rejected_progress(conn)
+    return jsonify({
+        "photos": photos, "reviewed": reviewed, "total": total,
+    })
 
 
 @bp.route("/api/rejected/<int:photo_id>/keep", methods=["POST"])
@@ -826,16 +980,26 @@ def api_rejected_keep(photo_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True})
     conn = get_db()
+    previous = _feedback_photo(conn, photo_id)
+    if previous is None:
+        return jsonify({"error": "not found"}), 404
     now = datetime.now().isoformat(timespec="seconds")
-    cur = conn.execute(
+    if previous["has_suggestion"] and previous["dismissed_at"] is None:
+        from curator.learning import dismiss_suggestion
+        dismiss_suggestion(conn, photo_id, commit=False)
+        feedback_id = _record_user_feedback(conn, photo_id, "suggested", "keep", previous)
+        conn.commit()
+        return jsonify({"ok": True, "photo_id": photo_id, "action": "keep",
+                        "feedback_id": feedback_id})
+    conn.execute(
         "UPDATE photos SET is_utility = 0, duplicate_of = NULL, "
         "rejected_reviewed_at = ? WHERE id = ?",
         (now, photo_id),
     )
-    if cur.rowcount == 0:
-        return jsonify({"error": "not found"}), 404
+    feedback_id = _record_user_feedback(conn, photo_id, "system", "keep", previous)
     conn.commit()
-    return jsonify({"ok": True, "photo_id": photo_id, "action": "keep"})
+    return jsonify({"ok": True, "photo_id": photo_id, "action": "keep",
+                    "feedback_id": feedback_id})
 
 
 @bp.route("/api/rejected/<int:photo_id>/reject", methods=["POST"])
@@ -843,15 +1007,25 @@ def api_rejected_reject(photo_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True})
     conn = get_db()
+    previous = _feedback_photo(conn, photo_id)
+    if previous is None:
+        return jsonify({"error": "not found"}), 404
+    if previous["has_suggestion"] and previous["dismissed_at"] is None:
+        from curator.learning import confirm_suggestion
+        confirm_suggestion(conn, photo_id, commit=False)
+        feedback_id = _record_user_feedback(conn, photo_id, "suggested", "reject", previous)
+        conn.commit()
+        return jsonify({"ok": True, "photo_id": photo_id, "action": "reject",
+                        "feedback_id": feedback_id})
     now = datetime.now().isoformat(timespec="seconds")
-    cur = conn.execute(
+    conn.execute(
         "UPDATE photos SET rejected_reviewed_at = ? WHERE id = ?",
         (now, photo_id),
     )
-    if cur.rowcount == 0:
-        return jsonify({"error": "not found"}), 404
+    feedback_id = _record_user_feedback(conn, photo_id, "system", "reject", previous)
     conn.commit()
-    return jsonify({"ok": True, "photo_id": photo_id, "action": "reject"})
+    return jsonify({"ok": True, "photo_id": photo_id, "action": "reject",
+                    "feedback_id": feedback_id})
 
 
 @bp.route("/api/rejected/accept-all", methods=["POST"])
@@ -860,14 +1034,52 @@ def api_rejected_accept_all():
         return jsonify({"ok": True, "count": 0})
     conn = get_db()
     now = datetime.now().isoformat(timespec="seconds")
-    cur = conn.execute(
-        "UPDATE photos SET rejected_reviewed_at = ? "
-        "WHERE error IS NULL AND rejected_reviewed_at IS NULL "
-        "  AND COALESCE(is_utility,0)=1",
-        (now,),
-    )
+    rows = _load_rejected(conn, unreviewed_only=True)
+    feedback_ids = []
+    for row in rows:
+        photo_id = row["id"]
+        previous = _feedback_photo(conn, photo_id)
+        if row["source"] == "suggested":
+            from curator.learning import confirm_suggestion
+            confirm_suggestion(conn, photo_id, commit=False)
+        else:
+            conn.execute(
+                "UPDATE photos SET rejected_reviewed_at = ? WHERE id = ?",
+                (now, photo_id),
+            )
+        feedback_ids.append(
+            _record_user_feedback(conn, photo_id, row["source"], "reject", previous)
+        )
     conn.commit()
-    return jsonify({"ok": True, "count": cur.rowcount})
+    return jsonify({"ok": True, "count": len(rows), "feedback_ids": feedback_ids})
+
+
+@bp.route("/api/feedback/<int:feedback_id>/undo", methods=["POST"])
+def api_feedback_undo(feedback_id: int):
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True})
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM user_feedback WHERE id = ? AND active = 1", (feedback_id,)
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "feedback action not found"}), 404
+    conn.execute(
+        "UPDATE photos SET is_utility = ?, duplicate_of = ?, rejected_reviewed_at = ?, "
+        "user_reject = ?, suggested_reject = ? WHERE id = ?",
+        (
+            row["previous_is_utility"], row["previous_duplicate_of"],
+            row["previous_reviewed_at"], row["previous_user_reject"],
+            row["previous_suggested_reject"], row["photo_id"],
+        ),
+    )
+    conn.execute(
+        "UPDATE photo_suggestions SET dismissed_at = ? WHERE photo_id = ?",
+        (row["previous_dismissed_at"], row["photo_id"]),
+    )
+    conn.execute("UPDATE user_feedback SET active = 0 WHERE id = ?", (feedback_id,))
+    conn.commit()
+    return jsonify({"ok": True, "photo_id": row["photo_id"]})
 
 
 # ---- Confirm (commit preview) -------------------------------------------------------
@@ -1031,18 +1243,15 @@ def done():
     if not commit_id:
         return redirect(url_for("web.intake"))
 
-    rows = conn.execute(
-        "SELECT role, COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes "
-        "FROM manifest WHERE commit_id = ? AND undone_at IS NULL "
-        "GROUP BY role",
+    has_files = conn.execute(
+        "SELECT 1 FROM manifest WHERE commit_id = ? AND undone_at IS NULL LIMIT 1",
         (commit_id,),
-    ).fetchall()
-    if not rows:
+    ).fetchone()
+    if not has_files:
         # Everything was undone; nothing to show
         return redirect(url_for("web.intake"))
 
-    stats = {r["role"]: {"count": r["count"], "bytes": r["bytes"]} for r in rows}
-    return render_template("done.html", commit_id=commit_id, stats=stats)
+    return render_template("done.html")
 
 
 @bp.route("/api/open-folder", methods=["POST"])
@@ -1065,15 +1274,7 @@ def api_open_folder():
 
 @bp.route("/suggested")
 def suggested():
-    if current_app.config["USE_FIXTURES"]:
-        return redirect(url_for("web.index"))
-    conn = get_db()
-    remaining = conn.execute(
-        "SELECT COUNT(*) FROM photo_suggestions ps "
-        "JOIN photos p ON p.id = ps.photo_id "
-        "WHERE ps.dismissed_at IS NULL AND p.error IS NULL"
-    ).fetchone()[0]
-    return render_template("suggested.html", remaining=remaining)
+    return redirect(url_for("web.rejected"))
 
 
 @bp.route("/api/suggested")
@@ -1106,9 +1307,19 @@ def api_suggested_keep(photo_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True})
     from curator.learning import dismiss_suggestion
-    if not dismiss_suggestion(get_db(), photo_id):
+    conn = get_db()
+    previous = _feedback_photo(conn, photo_id)
+    if (
+        previous is None
+        or not previous["has_suggestion"]
+        or previous["dismissed_at"] is not None
+    ):
         return jsonify({"error": "not found"}), 404
-    return jsonify({"ok": True, "action": "keep"})
+    if not dismiss_suggestion(conn, photo_id, commit=False):
+        return jsonify({"error": "suggestion no longer exists"}), 404
+    feedback_id = _record_user_feedback(conn, photo_id, "suggested", "keep", previous)
+    conn.commit()
+    return jsonify({"ok": True, "action": "keep", "feedback_id": feedback_id})
 
 
 @bp.route("/api/suggested/<int:photo_id>/reject", methods=["POST"])
@@ -1116,8 +1327,18 @@ def api_suggested_reject(photo_id: int):
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True})
     from curator.learning import confirm_suggestion
-    confirm_suggestion(get_db(), photo_id)
-    return jsonify({"ok": True, "action": "reject"})
+    conn = get_db()
+    previous = _feedback_photo(conn, photo_id)
+    if (
+        previous is None
+        or not previous["has_suggestion"]
+        or previous["dismissed_at"] is not None
+    ):
+        return jsonify({"error": "not found"}), 404
+    confirm_suggestion(conn, photo_id, commit=False)
+    feedback_id = _record_user_feedback(conn, photo_id, "suggested", "reject", previous)
+    conn.commit()
+    return jsonify({"ok": True, "action": "reject", "feedback_id": feedback_id})
 
 
 @bp.route("/api/suggested/accept-all", methods=["POST"])
@@ -1129,9 +1350,15 @@ def api_suggested_accept_all():
     photos = conn.execute(
         "SELECT photo_id FROM photo_suggestions WHERE dismissed_at IS NULL"
     ).fetchall()
+    feedback_ids = []
     for (pid,) in photos:
-        confirm_suggestion(conn, pid)
-    return jsonify({"ok": True, "count": len(photos)})
+        previous = _feedback_photo(conn, pid)
+        confirm_suggestion(conn, pid, commit=False)
+        feedback_ids.append(
+            _record_user_feedback(conn, pid, "suggested", "reject", previous)
+        )
+    conn.commit()
+    return jsonify({"ok": True, "count": len(photos), "feedback_ids": feedback_ids})
 
 
 # ---- Photos -------------------------------------------------------------------------

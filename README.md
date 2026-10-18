@@ -134,7 +134,7 @@ A live checklist with per-task ETA. Cancellable at any moment.
 
 Reads EXIF dates, file names, modification times
 
-Computes SHA-256 (exact duplicates), pHash (near-duplicates), sharpness (variance of Laplacian)
+Computes SHA-256 (exact duplicates), pHash (near-duplicates), sharpness, average brightness, highlight/shadow clipping, and image dimensions
 
 Detects screenshots by filename (e.g. Screenshot*.png)
 
@@ -153,16 +153,18 @@ Left sidebar: all groups, with progress ring and counter
 
 Center: alternative photos, which you can select or open full size
 
-Right: the current "chosen" photo, with metadata and confirmation actions
+Right: the current "chosen" photo, with measured metadata and confirmation actions
 
 On smaller screens, groups become a horizontal strip, alternatives become a swipeable photo deck, and the chosen photo and decision buttons stay within reach. Swiping browses; choosing a photo changes the winner. Nothing is rejected or organized by a swipe.
 
-For each group, you pick the best photo. It becomes the group's winner. The rest stay as "rejected within the group" (they will be moved to _curator/rejected/ at commit time).
+For each group, you pick the best photo. It becomes the group's winner. The rest stay as "rejected within the group" (they will be moved to _curator/rejected/ at commit time). Once enough confirmed choices exist, a local pairwise ranker may suggest a keeper. It never selects a photo for you.
+
+The comparison view shows measured brightness and resolution, plus sharpness relative to the current group. Sharpness is an edge-detail signal, not a universal quality score. Unknown measurements stay unknown.
 
 Keyboard-first: with focus outside controls, Enter confirms and advances. 1–9 promotes a different photo. ⌫ deletes the entire group. Focused buttons keep their normal Enter behavior.
 
 Phase 4 — Rejected (/rejected)
-Photos the system flagged as screenshots or documents (filename heuristic). They never entered groups. You can:
+One review queue combines system flags (currently screenshot filenames) and photos visually similar to past rejects. Similarity is a visual match, not the probability that you would reject a photo. You decide each outcome:
 
 K Keep → promote to a regular photo, joins groups next analysis
 
@@ -170,19 +172,16 @@ X Reject → confirmed reject, moves to _curator/rejected/ at commit
 
 Enter Accept all → confirms all visible rejects in one shot
 
-Phase 5 — Suggested (/suggested)
-Only appears once you've built up reject history (2–3 sessions). These are photos the system thinks you'll reject, based on visual similarity to previously-rejected groups.
+K Keep → overrides a suggestion and returns the photo to normal review
 
-K Keep → "actually I like this one", photo rejoins groups next analysis
+X Reject → confirms a suggestion; the photo joins the organize plan and future reject examples
 
-X Reject → confirmed reject, becomes a new reject example
+Enter Confirm all as rejected → confirms all visible flags and suggestions. Undo is saved for individual actions.
 
-Enter Accept all → all visible suggestions confirmed
-
-Optional to review — if you trust the system, hit Enter and move on.
+The old /suggested address redirects to this queue.
 
 Phase 6 — Confirm & organize (/confirm)
-The dry-run: shows a preview of every file that will be moved, the destination, the new name.
+The dry-run: shows the file counts, total size, destinations, and a concise filename example before anything moves.
 
 Kept: winner photos — move to _curator/winner/
 
@@ -310,7 +309,11 @@ Z	Toggle zoom (2.5×)
 Enter	Select the photo shown, close preview, and advance to the next group
 Esc	Close
 Learning from your tastes
-After every commit, the tool learns what you rejected:
+Keeper recommendations learn only from confirmed group winners and alternatives. A regularized pairwise ranker becomes available after three distinct reviewed groups; it appears as an optional suggestion, never a preselection.
+
+The discard model learns only from explicit individual keep/reject actions. It requires at least three examples of each label and can only prioritize existing visual-match suggestions. It does not classify a photo as a reject or move it automatically. Group alternatives are not treated as explicit rejects.
+
+Separately, after commits, the tool stores what you rejected:
 
 For each group you deleted, compute the centroid of its embeddings (average of member photos)
 
@@ -320,11 +323,11 @@ On the next analysis, before grouping:
 
 For every new photo, compute its cosine similarity to every stored reject centroid
 
-If similarity ≥ 0.82, flag it as suggested_reject
+If cosine similarity ≥ 0.82, show it as a suggestion to review
 
 Flagged photos are excluded from groups and appear in /suggested
 
-The threshold (0.82) is conservative by design:
+The 0.82 cosine-similarity threshold is conservative by design. It is not a probability:
 
 False positives (flagging a good photo) are annoying
 
@@ -332,7 +335,7 @@ False negatives (missing a bad photo) are harmless — it just goes into a group
 
 You can tune it: DEFAULT_THRESHOLD in src/curator/learning.py.
 
-After 2–3 sessions, expect 10–25% of new photos to appear in /suggested. Review them in 30 seconds with Enter, K for exceptions.
+Confirmed suggestions are included in the dry-run plan and are counted separately in the completion recap. Files are moved into folders, not deleted, so no disk space is freed.
 
 CLI reference
 The web UI is the primary interface, but every step is also available via CLI.
@@ -475,6 +478,8 @@ Time gap	Cosine threshold
 ≤ 5 minutes	0.85
 > 5 minutes	0.90
 The web UI's /analysis uses smart automatically when embeddings are available, and falls back to phash otherwise.
+
+Groups use anchor checks rather than unrestricted single-link chaining. A similar pair can join two groups only when their anchor photos also match under the active similarity method. This prevents a gradual chain of small differences from turning a long sequence into one oversized group. It favors several smaller groups over a broad group when similarity drifts across a burst.
 
 Benchmarking
 The curator benchmark command measures which scorer correctly picks your labeled winners. It's agnostic: it works with any function that returns a photo_id given a group's photos.
