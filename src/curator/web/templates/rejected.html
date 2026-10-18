@@ -5,6 +5,7 @@
 </script>
 
 <div x-data="rejectedApp()" x-init="load()" @keydown.window="onKey($event)" class="app app--rejected">
+    {% include "product_bar.html" %}
     <aside class="sidebar" aria-label="Rejected">
         <header class="sidebar__header">
             <div class="sidebar__label">System rejects</div>
@@ -62,17 +63,24 @@
                 <div class="grid">
                     <template x-for="(photo, idx) in photos" :key="photo.id">
                         <div class="thumb thumb--rejected">
-                            <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy"
-                                 @click="openLightbox(photo.id)"
-                                 style="cursor: zoom-in;">
+                            <button type="button" class="thumb__preview" @click="openLightbox(photo.id)"
+                                    :aria-label="'View photo full size: ' + photo.reason">
+                                <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy">
+                            </button>
                             <span class="thumb__reason" x-text="photo.reason"></span>
                             <span class="thumb__meta" style="opacity: 1; position: relative; inset: auto; background: none; backdrop-filter: none; padding: 0;">
                                 <button type="button" class="thumb__action thumb__action--keep" @click="keep(photo.id)">
-                                    Keep <kbd>K</kbd>
+                                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                                <path d="m4 10.5 4 4 8-9"></path>
+                                            </svg>
+                                            Keep <kbd>K</kbd>
                                 </button>
-                                <button type="button" class="thumb__action thumb__action--reject" @click="reject(photo.id)">
-                                    Reject <kbd>X</kbd>
-                                </button>
+                                        <button type="button" class="thumb__action thumb__action--reject" @click="reject(photo.id)">
+                                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                                <path d="m5 5 10 10M15 5 5 15"></path>
+                                            </svg>
+                                            Reject <kbd>X</kbd>
+                                        </button>
                             </span>
                         </div>
                     </template>
@@ -102,7 +110,9 @@
          x-show="open"
          x-transition.opacity.duration.150ms
          class="lightbox"
-         @keydown.escape.window="close()"
+         role="dialog" aria-modal="true" aria-label="Photo preview"
+         @keydown.tab="trapFocus($event)"
+         @keydown.escape.window.stop="close()"
          @keydown.arrow-right.window="next()"
          @keydown.arrow-left.window="prev()"
          @keydown.z.window="zoom = !zoom"
@@ -115,7 +125,7 @@
             <span class="lightbox__hint">
                 <kbd>Z</kbd> zoom · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>Esc</kbd> close
             </span>
-            <button type="button" class="lightbox__close" @click="close()">Close</button>
+            <button type="button" class="lightbox__close" x-ref="closeButton" @click="close()">Close</button>
         </div>
     </div>
 </div>

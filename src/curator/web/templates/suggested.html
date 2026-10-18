@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 <div x-data="suggestedApp()" x-init="load()" @keydown.window="onKey($event)" class="app app--rejected">
+    {% include "product_bar.html" %}
     <aside class="sidebar">
         <header class="sidebar__header">
             <div class="sidebar__label">Similar to past rejects</div>
@@ -39,24 +40,37 @@
                         <div class="main__title" x-text="photos.length + ' photo' + (photos.length === 1 ? '' : 's')"></div>
                     </div>
                     <button type="button" class="btn btn--ghost" @click="acceptAll()" style="width: auto;">
-                        Accept all
+                        <span class="btn__label">
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="m4 10.5 4 4 8-9"></path>
+                            </svg>
+                            Accept all
+                        </span>
                     </button>
                 </header>
 
                 <div class="grid">
                     <template x-for="photo in photos" :key="photo.id">
                         <div class="thumb thumb--rejected">
-                            <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy"
-                                 @click="openLightbox(photo.id)" style="cursor: zoom-in;">
+                            <button type="button" class="thumb__preview" @click="openLightbox(photo.id)"
+                                    :aria-label="'View suggested photo full size'">
+                                <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy">
+                            </button>
                             <span class="thumb__reason"
                                   x-text="Math.round(photo.similarity * 100) + '% similar'"></span>
                             <span class="thumb__meta" style="opacity: 1; position: relative; inset: auto; background: none; backdrop-filter: none; padding: 0;">
                                 <button type="button" class="thumb__action thumb__action--keep"
                                         @click="keep(photo.id)">
+                                    <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                        <path d="m4 10.5 4 4 8-9"></path>
+                                    </svg>
                                     Keep <kbd>K</kbd>
                                 </button>
                                 <button type="button" class="thumb__action thumb__action--reject"
                                         @click="reject(photo.id)">
+                                    <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                        <path d="m5 5 10 10M15 5 5 15"></path>
+                                    </svg>
                                     Reject <kbd>X</kbd>
                                 </button>
                             </span>
@@ -83,7 +97,9 @@
     <div x-data="lightbox()"
          @open-lightbox.window="show($event.detail.photos, $event.detail.index)"
          x-show="open" x-transition.opacity.duration.150ms class="lightbox"
-         @keydown.escape.window="close()" @keydown.arrow-right.window="next()"
+         role="dialog" aria-modal="true" aria-label="Photo preview"
+         @keydown.tab="trapFocus($event)"
+         @keydown.escape.window.stop="close()" @keydown.arrow-right.window="next()"
          @keydown.arrow-left.window="prev()" @keydown.z.window="zoom = !zoom"
          style="display: none;">
         <div class="lightbox__stage" @click="toggleZoom($event)">
@@ -91,7 +107,7 @@
         </div>
         <div class="lightbox__chrome">
             <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
-            <button type="button" class="lightbox__close" @click="close()">Close</button>
+            <button type="button" class="lightbox__close" x-ref="closeButton" @click="close()">Close</button>
         </div>
     </div>
 </div>

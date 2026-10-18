@@ -47,18 +47,20 @@ class ProgressEstimator:
         if eta is None:
             label = "Estimating…"
         else:
-            low = max(int(eta * 0.8 // 10 * 10), 10)
-            high = max(int(eta * 1.2 // 10 * 10), low + 10)
-            if high >= 60:
-                label = f"{low // 60}–{high // 60 + 1} min remaining"
-            else:
-                label = f"{low}–{high} s remaining"
+            eta_seconds = (
+                max(1, round(eta)) if remaining > 0 else 0
+            )
+            minutes, seconds = divmod(eta_seconds, 60)
+            label = (
+                f"{minutes}m {seconds:02d}s remaining"
+                if minutes else f"{seconds}s remaining"
+            )
 
         return {
             "processed": processed,
             "total": self.total,
             "rate": round(rate, 2),
-            "eta_seconds": int(eta) if eta else None,
+            "eta_seconds": eta_seconds if eta is not None else None,
             "eta_label": label,
             "confidence": "stable" if elapsed_total > 15 else "warming",
         }

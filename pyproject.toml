@@ -26,4 +26,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"curator.web" = ["templates/*.html", "static/*.js", "static/*.css"]
+"curator.web" = ["templates/*.html", "static/*.js", "static/*.css", "static/*.txt"]

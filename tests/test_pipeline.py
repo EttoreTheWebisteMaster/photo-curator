@@ -111,7 +111,16 @@ def test_incremental_rescan(photos, tmp_path):
 def test_grouping_by_session_and_similarity(photos, tmp_path):
     conn = db.connect(tmp_path / "t.db")
     scan.scan(photos, conn)
-    res = group.build_groups(conn, session_gap_min=30, max_hamming=10)
+    progress = []
+    res = group.build_groups(
+        conn,
+        session_gap_min=30,
+        max_hamming=10,
+        progress=lambda count, total: progress.append((count, total)),
+    )
+    assert progress[0][0] == 0
+    assert progress[-1][0] == progress[-1][1]
+    assert all(a[0] <= b[0] for a, b in zip(progress, progress[1:]))
     g = {Path(r["path"]).name: r["group_id"] for r in conn.execute(
         "SELECT p.path, g.group_id FROM groups g JOIN photos p ON p.id = g.photo_id")}
     assert g["a1.jpg"] == g["a3.jpg"]          # same scene, same session
@@ -346,6 +355,8 @@ def test_web_app_serves_index_with_fixtures():
     # Sidebar is client-rendered from initial-data JSON; assert on the payload.
     assert '"useFixtures": true' in body
     assert '"groups":' in body
+    assert "Every photo group reviewed" in body
+    assert "All groups reviewed" not in body
 
 
 def test_web_api_endpoints_return_ok():
@@ -358,6 +369,56 @@ def test_web_api_endpoints_return_ok():
     assert r.status_code == 200 and r.get_json()["status"] == "completed"
     r = client.post("/api/groups/1/delete")
     assert r.status_code == 200 and r.get_json()["status"] == "deleted"
+
+
+def test_photo_asset_urls_refresh_when_photo_changes(tmp_path):
+    from curator.web.app import create_app
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo_path = root / "photo.jpg"
+    save(make_scene(1), photo_path, mtime="2026-10-01T10:00:00")
+
+    db_path = tmp_path / "web.db"
+    conn = db.connect(db_path)
+    scan.scan(root, conn)
+    photo_id = conn.execute("SELECT id FROM photos").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO groups (photo_id, group_id, run_id) VALUES (?, 1, 'test')",
+        (photo_id,),
+    )
+    conn.execute(
+        "INSERT INTO group_states (group_id, current_winner_photo_id, updated_at) "
+        "VALUES (1, ?, '2026-10-01T10:00:00')",
+        (photo_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    client = create_app(db_path).test_client()
+    first_photo = client.get("/api/groups/1").get_json()["photos"][0]
+    first_thumb_url = first_photo["thumb"]
+    first_full_url = first_photo["url"]
+    first_thumb = client.get(first_thumb_url).data
+    first_full = client.get(first_full_url).data
+
+    save(make_scene(2), photo_path, mtime="2026-10-02T10:00:00")
+    conn = db.connect(db_path)
+    scan.scan(root, conn, force=True)
+    conn.close()
+
+    updated_photo = client.get("/api/groups/1").get_json()["photos"][0]
+    assert updated_photo["thumb"] != first_thumb_url
+    assert updated_photo["url"] != first_full_url
+    updated_thumb = client.get(updated_photo["thumb"])
+    assert updated_thumb.status_code == 200
+    assert updated_thumb.data != first_thumb
+    updated_full = client.get(updated_photo["url"])
+    assert updated_full.status_code == 200
+    assert updated_full.data != first_full
+
+    group_thumb = client.get("/api/groups").get_json()[0]["thumb"]
+    assert group_thumb == updated_photo["thumb"]
 
 
 # ---- Step 3 (Sprint 2 refinements) --------------------------------------------------------
@@ -404,6 +465,28 @@ def test_analyze_status_endpoint_shape():
     assert r.status_code == 200
     body = r.get_json()
     assert set(body.keys()) >= {"running", "tasks", "error", "final"}
+
+
+def test_completed_review_sidebar_keeps_next_step_available():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    page = app.test_client().get("/").get_data(as_text=True)
+
+    assert "reviewFinished" in page
+    assert 'class="sidebar__next-step"' in page
+    assert ":href=\"completionNextStep.href\"" in page
+    assert "of photo groups reviewed" in page
+
+
+def test_deleted_group_state_shows_keeper_and_other_photo_strip():
+    from curator.web.app import create_app
+    app = create_app(use_fixtures=True)
+    page = app.test_client().get("/").get_data(as_text=True)
+
+    assert "selectedGroup.status === 'deleted'" in page
+    assert "currentWinner.thumb || currentWinner.url" in page
+    assert 'x-for="photo in rejectedPhotos"' in page
+    assert "Restore group to review" in page
 
 
 def test_analyze_endpoint_fixtures_mode():
@@ -468,6 +551,12 @@ def test_real_analysis_end_to_end(tmp_path):
     assert status["error"] is None
     assert status["final"]["mode"] in ("fresh", "no_changes")
     assert status["final"].get("groups", 0) >= 1
+    assert len(status["tasks"]) == 3
+    for task in status["tasks"]:
+        assert task["status"] == "done"
+        assert task["started_at"] is not None
+        assert task["finished_at"] >= task["started_at"]
+        assert task["eta_seconds"] == 0
 
     # Verify group_states were populated
     conn = db.connect(tmp_path / "t.db")
@@ -648,6 +737,56 @@ def test_plan_commit_basic(tmp_path):
     assert moves[aid].dst_path.suffix == ".jpg"
 
 
+def test_plan_commit_uses_safe_editable_batch_name_and_unique_id(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    conn.execute(
+        "UPDATE group_states SET status='completed', current_winner_photo_id=("
+        "SELECT MIN(photo_id) FROM groups WHERE group_id=group_states.group_id)"
+    )
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root, batch_name="Summer Trip")
+    assert not plan.errors
+    assert plan.batch_name == "Summer-Trip"
+    assert [move.dst_path.name for move in plan.moves] == [
+        "20261015_Summer-Trip_001.jpg",
+        "20261015_Summer-Trip_002.jpg",
+    ]
+
+    blank_name_plan = commit.plan_commit(conn, root, batch_name="")
+    assert [move.dst_path.name for move in blank_name_plan.moves] == [
+        "20261015_001.jpg",
+        "20261015_002.jpg",
+    ]
+
+    existing = root / "_curator" / "winner" / "20261015_Other-Trip_003.jpg"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing")
+    next_plan = commit.plan_commit(conn, root, batch_name="Summer Trip")
+    assert next_plan.moves[0].dst_path.name == "20261015_Summer-Trip_004.jpg"
+    assert next_plan.moves[1].dst_path.name == "20261015_Summer-Trip_005.jpg"
+    result = commit.execute_commit(next_plan, conn)
+    assert result["moved"] == 2
+    assert all(move.dst_path.exists() for move in next_plan.moves)
+
+
+def test_batch_name_rejects_empty_or_path_only_values():
+    import pytest
+    from curator.commit import normalize_batch_name
+
+    assert normalize_batch_name("../Summer Trip!") == "Summer-Trip"
+    assert normalize_batch_name("") == ""
+    assert normalize_batch_name("   ") == ""
+    with pytest.raises(ValueError, match="Use letters"):
+        normalize_batch_name("../")
+
+
 def test_plan_commit_blocks_on_pending(tmp_path):
     from curator import commit, db, group, scan
     root = tmp_path / "photos"; root.mkdir()
@@ -778,12 +917,30 @@ def test_preview_endpoint_no_disk_writes(tmp_path):
 
     mtime_before = os.stat(root / "a.jpg").st_mtime
     app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
-    r = app.test_client().post("/api/commit/preview")
+    r = app.test_client().post(
+        "/api/commit/preview", json={"batch_name": "Edited Batch"}
+    )
     assert r.status_code == 200
     body = r.get_json()
     assert body["stats"]["total_moves"] >= 1
+    assert body["batch_name"] == "Edited-Batch"
+    assert body["sample"][0]["dst"].endswith("_Edited-Batch_001.jpg")
     assert os.stat(root / "a.jpg").st_mtime == mtime_before
     assert not (root / "_curator").exists()
+
+    blank_name_response = app.test_client().post(
+        "/api/commit/preview", json={"batch_name": ""}
+    )
+    assert blank_name_response.status_code == 200
+    blank_name_body = blank_name_response.get_json()
+    assert blank_name_body["batch_name"] == ""
+    assert blank_name_body["sample"][0]["dst"].endswith("20261015_001.jpg")
+
+    confirm_response = app.test_client().get("/confirm")
+    assert confirm_response.status_code == 200
+    assert b'id="plan-preview-title">File names' in confirm_response.data
+    assert b'Example filename' in confirm_response.data
+    assert b'<table class="plan-table">' not in confirm_response.data
 
 
 # ---- Step 5b: commit execution + undo -----------------------------------------------
@@ -1001,6 +1158,8 @@ def test_commit_endpoint_async(tmp_path):
     # Verify done page reachable
     r = client.get("/done")
     assert r.status_code == 200
+    assert b"Space organized" in r.data
+    assert b"available disk space is unchanged" in r.data
 
 
 # ---- Step 6a: smart grouping --------------------------------------------------------

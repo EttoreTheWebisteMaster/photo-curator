@@ -58,6 +58,44 @@ def _stop() -> threading.Event:
     return current_app.config["_analysis_stop"]
 
 
+def _analysis_tasks() -> list[dict]:
+    return [
+        {
+            "id": "scan",
+            "label": "Scan photo metadata",
+            "description": "Read photo details and detect duplicates.",
+            "status": "pending",
+            "count": 0,
+            "total": 0,
+            "eta_seconds": None,
+            "started_at": None,
+            "finished_at": None,
+        },
+        {
+            "id": "embed",
+            "label": "Analyze visual similarities",
+            "description": "Prepare visual details for comparing similar shots.",
+            "status": "pending",
+            "count": 0,
+            "total": 0,
+            "eta_seconds": None,
+            "started_at": None,
+            "finished_at": None,
+        },
+        {
+            "id": "group",
+            "label": "Build photo groups",
+            "description": "Bring similar photos together for your review.",
+            "status": "pending",
+            "count": 0,
+            "total": 0,
+            "eta_seconds": None,
+            "started_at": None,
+            "finished_at": None,
+        },
+    ]
+
+
 # ---- DB helpers ---------------------------------------------------------------------
 
 def get_db():
@@ -107,19 +145,15 @@ def _analysis_fingerprint(conn) -> str:
 
 # ---- Serialisation ------------------------------------------------------------------
 
-def _thumb_url(photo_id: int) -> str:
-    return f"/photos/{photo_id}/thumb"
-
-
-def _full_url(photo_id: int) -> str:
-    return f"/photos/{photo_id}/full"
+def _photo_url(photo_id: int, mtime: float, size: int, variant: str) -> str:
+    return f"/photos/{photo_id}/{variant}?v={mtime}-{size}"
 
 
 def _photo_payload(row) -> dict:
     return {
         "id": row["id"],
-        "thumb": _thumb_url(row["id"]),
-        "url": _full_url(row["id"]),
+        "thumb": _photo_url(row["id"], row["mtime"], row["size"], "thumb"),
+        "url": _photo_url(row["id"], row["mtime"], row["size"], "full"),
         "sharpness": row["sharpness"] or 0.0,
         "exposure": 0.85,
     }
@@ -132,12 +166,15 @@ def _load_group_list(conn) -> list[dict]:
             gs.group_id,
             gs.status,
             gs.current_winner_photo_id,
+            winner.size AS winner_size,
+            winner.mtime AS winner_mtime,
             gs.updated_at,
             COUNT(p.id) AS photo_count,
             MIN(p.taken_at) AS taken_at
         FROM group_states gs
         JOIN groups g ON g.group_id = gs.group_id
         JOIN photos p ON p.id = g.photo_id
+        LEFT JOIN photos winner ON winner.id = gs.current_winner_photo_id
         WHERE p.error IS NULL
         GROUP BY gs.group_id
         ORDER BY gs.status = 'completed', gs.group_id
@@ -150,7 +187,10 @@ def _load_group_list(conn) -> list[dict]:
             "current_winner": r["current_winner_photo_id"],
             "photo_count": r["photo_count"],
             "taken_at": r["taken_at"],
-            "thumb": _thumb_url(r["current_winner_photo_id"]) if r["current_winner_photo_id"] else None,
+            "thumb": (
+                _photo_url(r["current_winner_photo_id"], r["winner_mtime"], r["winner_size"], "thumb")
+                if r["current_winner_photo_id"] else None
+            ),
         }
         for r in rows
     ]
@@ -306,14 +346,14 @@ def _simulate_analysis(total: int, state: dict, stop: threading.Event) -> dict:
         state.update({
             "running": True,
             "folder": "(simulated)",
-            "tasks": [
-                {"id": "scan", "label": "Reading metadata and detecting duplicates",
-                "status": "running", "count": 0, "total": 0, "eta_label": "Calibrating…"},
-                {"id": "embed", "label": "Computing visual embeddings", "status": "pending"},
-                {"id": "group", "label": "Grouping similar shots", "status": "pending"},
-            ],
+            "tasks": _analysis_tasks(),
             "started_at": time.time(), "finished_at": None,
             "error": None, "final": None, "cancelled": False,
+        })
+        state["tasks"][0].update({
+            "status": "running",
+            "total": total,
+            "started_at": time.time(),
         })
         est = ProgressEstimator(total=total)
         try:
@@ -324,15 +364,33 @@ def _simulate_analysis(total: int, state: dict, stop: threading.Event) -> dict:
                 time.sleep(0.03)
                 state["tasks"][0]["count"] = i + 1
                 snap = est.update(i + 1)
-                state["tasks"][0]["eta_label"] = snap["eta_label"]
+                state["tasks"][0]["eta_seconds"] = snap["eta_seconds"]
             state["tasks"][0]["status"] = "done"
+            state["tasks"][0]["finished_at"] = time.time()
             if state["cancelled"]:
                 state["tasks"][1]["status"] = "pending"
                 state["final"] = {"mode": "cancelled"}
                 return
             state["tasks"][1]["status"] = "running"
+            state["tasks"][1].update({
+                "started_at": time.time(),
+                "total": 1,
+            })
             time.sleep(0.3)
+            state["tasks"][1]["count"] = 1
             state["tasks"][1]["status"] = "done"
+            state["tasks"][1]["finished_at"] = time.time()
+            state["tasks"][1]["summary"] = "Visual analysis complete"
+            state["tasks"][2]["status"] = "running"
+            state["tasks"][2].update({
+                "started_at": time.time(),
+                "total": 1,
+            })
+            time.sleep(0.1)
+            state["tasks"][2]["count"] = 1
+            state["tasks"][2]["status"] = "done"
+            state["tasks"][2]["finished_at"] = time.time()
+            state["tasks"][2]["summary"] = f"{total // 4} groups ready"
             state["final"] = {"mode": "fresh", "groups": total // 4, "photos": total}
         except Exception as exc:
             state["error"] = f"{type(exc).__name__}: {exc}"
@@ -354,14 +412,13 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
         state.update({
             "running": True,
             "folder": str(folder_path),
-            "tasks": [
-                {"id": "scan", "label": "Reading metadata and detecting duplicates",
-                 "status": "running", "count": 0, "total": 0, "eta_label": "Calibrating…"},
-                {"id": "embed", "label": "Computing visual embeddings", "status": "pending"},
-                {"id": "group", "label": "Grouping similar shots", "status": "pending"},
-            ],
+            "tasks": _analysis_tasks(),
             "started_at": time.time(), "finished_at": None,
             "error": None, "final": None, "cancelled": False,
+        })
+        state["tasks"][0].update({
+            "status": "running",
+            "started_at": time.time(),
         })
         stop.clear()
 
@@ -376,12 +433,14 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
             def on_progress(stats):
                 state["tasks"][0]["count"] = stats["seen"]
                 snap = est.update(stats["seen"])
-                state["tasks"][0]["eta_label"] = snap["eta_label"]
+                state["tasks"][0]["eta_seconds"] = snap["eta_seconds"]
 
             scan_stats = scanmod.scan(
                 folder_path, conn, progress=on_progress, stop_event=stop
             )
             state["tasks"][0]["count"] = total_files
+            state["tasks"][0]["eta_seconds"] = 0
+            state["tasks"][0]["finished_at"] = time.time()
             if stop.is_set():
                 state["tasks"][0]["status"] = "done"
                 state["tasks"][1]["status"] = "pending"
@@ -393,37 +452,83 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
             state["tasks"][0]["status"] = "done"
 
             # Task 1: embeddings (optional — torch may not be installed)
-            state["tasks"][1]["status"] = "running"
+            state["tasks"][1].update({
+                "status": "running",
+                "started_at": time.time(),
+            })
             embeddings_available = False
+            embed_estimator = None
+
+            def on_embed_progress(stats):
+                nonlocal embed_estimator
+                task = state["tasks"][1]
+                task["total"] = stats["candidates"]
+                task["count"] = stats["embedded"]
+                if embed_estimator is None and stats["candidates"] > 0:
+                    embed_estimator = ProgressEstimator(
+                        total=stats["candidates"], min_samples=5
+                    )
+                if embed_estimator is not None:
+                    task["eta_seconds"] = embed_estimator.update(
+                        stats["embedded"]
+                    )["eta_seconds"]
+                task["summary"] = (
+                    f"{stats['embedded']} / {stats['candidates']} photos"
+                )
+
             try:
                 embed_stats = embedmod.embed_folder(
                     conn, "dinov2_vits14", batch_size=8,
-                    progress=lambda s: state["tasks"][1].update(
-                        summary=f"{s['embedded']} / {s['candidates']} photos"
-                    ),
+                    progress=on_embed_progress,
                 )
+                state["tasks"][1]["count"] = embed_stats["embedded"]
+                state["tasks"][1]["total"] = embed_stats["candidates"]
+                state["tasks"][1]["eta_seconds"] = 0
                 state["tasks"][1]["status"] = "done"
+                state["tasks"][1]["finished_at"] = time.time()
                 state["tasks"][1]["summary"] = (
                     f"{embed_stats['embedded']} embedded"
                     if embed_stats["embedded"] else "already embedded"
                 )
                 embeddings_available = True
             except ImportError:
+                state["tasks"][1]["eta_seconds"] = 0
                 state["tasks"][1]["status"] = "done"
+                state["tasks"][1]["finished_at"] = time.time()
                 state["tasks"][1]["summary"] = "torch not installed — pHash only"
             except Exception as exc:
                 state["tasks"][1]["status"] = "error"
+                state["tasks"][1]["finished_at"] = time.time()
                 state["tasks"][1]["summary"] = f"{type(exc).__name__}: {str(exc)[:50]}"
 
             # Task 2: grouping
-            state["tasks"][2]["status"] = "running"
+            state["tasks"][2].update({
+                "status": "running",
+                "started_at": time.time(),
+            })
+            group_estimator = None
+
+            def on_group_progress(count, total):
+                nonlocal group_estimator
+                task = state["tasks"][2]
+                if group_estimator is None and total > 0:
+                    task["total"] = total
+                    group_estimator = ProgressEstimator(total=total)
+                task["count"] = count
+                if group_estimator is not None:
+                    task["eta_seconds"] = group_estimator.update(count)["eta_seconds"]
+                task["summary"] = f"{count:,} / {total:,} comparisons"
 
             new_fp = _analysis_fingerprint(conn)
             old_fp = _load_setting(db_path, "grouping_fingerprint")
             has_groups = conn.execute("SELECT COUNT(*) FROM group_states").fetchone()[0] > 0
 
             if new_fp == old_fp and has_groups and not scan_stats["new"]:
+                state["tasks"][2]["count"] = 1
+                state["tasks"][2]["total"] = 1
+                state["tasks"][2]["eta_seconds"] = 0
                 state["tasks"][2]["status"] = "done"
+                state["tasks"][2]["finished_at"] = time.time()
                 state["tasks"][2]["summary"] = "no changes"
                 state["final"] = {"mode": "no_changes"}
             else:
@@ -436,19 +541,32 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
                 if embeddings_available:
                     try:
                         group_stats = groupmod.build_groups(
-                            conn, method="smart", model="dinov2_vits14"
+                            conn, method="smart", model="dinov2_vits14",
+                            progress=on_group_progress,
                         )
                         grouping_method = "smart"
                     except ValueError as exc:
                         state["tasks"][2]["summary"] = f"fallback: {exc}"
-                        group_stats = groupmod.build_groups(conn, method="phash")
+                        group_stats = groupmod.build_groups(
+                            conn, method="phash", progress=on_group_progress
+                        )
                         grouping_method = "phash"
                 else:
-                    group_stats = groupmod.build_groups(conn, method="phash")
+                    group_stats = groupmod.build_groups(
+                        conn, method="phash", progress=on_group_progress
+                    )
                     grouping_method = "phash"
 
                 _save_setting(db_path, "grouping_fingerprint", new_fp)
+                state["tasks"][2]["count"] = max(
+                    state["tasks"][2]["total"], 1
+                )
+                state["tasks"][2]["total"] = max(
+                    state["tasks"][2]["total"], 1
+                )
+                state["tasks"][2]["eta_seconds"] = 0
                 state["tasks"][2]["status"] = "done"
+                state["tasks"][2]["finished_at"] = time.time()
                 state["tasks"][2]["summary"] = (
                     f"{group_stats['groups']} groups ({grouping_method})"
                 )
@@ -466,6 +584,7 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
             for t in state["tasks"]:
                 if t["status"] == "running":
                     t["status"] = "error"
+                    t["finished_at"] = time.time()
         finally:
             if conn is not None:
                 conn.close()
@@ -664,8 +783,8 @@ def _load_rejected(conn, unreviewed_only: bool = True) -> list[dict]:
     return [
         {
             "id": r["id"],
-            "thumb": _thumb_url(r["id"]),
-            "url": _full_url(r["id"]),
+            "thumb": _photo_url(r["id"], r["mtime"], r["size"], "thumb"),
+            "url": _photo_url(r["id"], r["mtime"], r["size"], "full"),
             "reason": "Screenshot or document",
             "reason_detail": None,
             "taken_at": r["taken_at"],
@@ -772,6 +891,12 @@ def api_commit_preview():
         return jsonify({"stats": {}, "errors": [], "sample": [], "has_errors": False})
     from curator import commit as commitmod
 
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid file-name settings."}), 400
+
     source_root_str = _load_setting(current_app.config["DB_PATH"], "last_folder")
     if not source_root_str:
         return jsonify({"error": "No source folder. Run intake first."}), 400
@@ -779,7 +904,12 @@ def api_commit_preview():
     if not source_root.is_dir():
         return jsonify({"error": f"Source folder not found: {source_root}"}), 400
 
-    plan = commitmod.plan_commit(get_db(), source_root)
+    try:
+        plan = commitmod.plan_commit(
+            get_db(), source_root, batch_name=payload.get("batch_name")
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify(commitmod.plan_to_dict(plan))
 
 
@@ -794,6 +924,20 @@ def api_commit_execute():
     if current_app.config["USE_FIXTURES"]:
         return jsonify({"ok": True, "mode": "fixtures"})
 
+    from curator import commit as commitmod
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid file-name settings."}), 400
+    batch_name = payload.get("batch_name")
+    if batch_name is not None:
+        try:
+            batch_name = commitmod.normalize_batch_name(batch_name)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
     state = _commit_state()
     if state["running"]:
         return jsonify({"error": "already running"}), 409
@@ -807,12 +951,14 @@ def api_commit_execute():
 
     db_path = current_app.config["DB_PATH"]
     threading.Thread(
-        target=_run_commit, args=(db_path, source_root, state), daemon=True
+        target=_run_commit, args=(db_path, source_root, state, batch_name), daemon=True
     ).start()
     return jsonify({"ok": True})
 
 
-def _run_commit(db_path: str, source_root: Path, state: dict) -> None:
+def _run_commit(
+    db_path: str, source_root: Path, state: dict, batch_name: str | None = None
+) -> None:
     from curator import commit as commitmod
     state.clear()
     state.update({
@@ -822,7 +968,7 @@ def _run_commit(db_path: str, source_root: Path, state: dict) -> None:
     conn = None
     try:
         conn = dbmod.connect(db_path)
-        plan = commitmod.plan_commit(conn, source_root)
+        plan = commitmod.plan_commit(conn, source_root, batch_name=batch_name)
         if plan.has_errors:
             state["error"] = "Cannot commit: " + "; ".join(plan.errors)
             return
@@ -936,7 +1082,7 @@ def api_suggested():
         return jsonify({"photos": [], "total": 0})
     conn = get_db()
     rows = conn.execute(
-        "SELECT p.id, p.path, ps.similarity "
+        "SELECT p.id, p.size, p.mtime, ps.similarity "
         "FROM photo_suggestions ps JOIN photos p ON p.id = ps.photo_id "
         "WHERE ps.dismissed_at IS NULL AND p.error IS NULL "
         "ORDER BY ps.similarity DESC"
@@ -945,8 +1091,8 @@ def api_suggested():
         "photos": [
             {
                 "id": r["id"],
-                "thumb": _thumb_url(r["id"]),
-                "url": _full_url(r["id"]),
+                "thumb": _photo_url(r["id"], r["mtime"], r["size"], "thumb"),
+                "url": _photo_url(r["id"], r["mtime"], r["size"], "full"),
                 "similarity": round(float(r["similarity"]), 3),
             }
             for r in rows

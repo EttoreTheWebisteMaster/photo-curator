@@ -9,8 +9,9 @@ Methods:
 """
 from __future__ import annotations
 
-import uuid
+from collections.abc import Callable
 from datetime import datetime
+import uuid
 
 from .embeddings import load_embedding
 
@@ -57,7 +58,8 @@ def _time_adaptive_cosine_threshold(dt_seconds: float) -> float:
 
 def compute_assignments(conn, *, session_gap_min: float = 30.0,
                         method: str = "phash", model: str | None = None,
-                        max_hamming: int = 10, cosine_threshold: float = 0.20):
+                        max_hamming: int = 10, cosine_threshold: float = 0.20,
+                        progress: Callable[[int, int], None] | None = None):
     """Return ([(photo_id, group_id), ...], meta) without writing to groups table.
 
     Methods:
@@ -142,17 +144,38 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
         bucket = known_by_day if r["time_known"] else unknown_by_day
         bucket.setdefault(r["taken_at"][:10], []).append(i)
 
+    total_pairs = sum(len(sess) * (len(sess) - 1) // 2 for sess in sessions)
+    total_pairs += sum(
+        len(unknown) * (len(unknown) + len(known_by_day.get(day, [])) - 1)
+        for day, unknown in unknown_by_day.items()
+    )
+    compared = 0
+    progress_step = max(1, total_pairs // 100)
+    if progress:
+        progress(0, total_pairs)
+
     uf = _UnionFind(n)
     for sess in sessions:
         for a in range(len(sess)):
             for b in range(a + 1, len(sess)):
                 if similar(sess[a], sess[b]):
                     uf.union(sess[a], sess[b])
+                compared += 1
+                if progress and (
+                    compared % progress_step == 0 or compared == total_pairs
+                ):
+                    progress(compared, total_pairs)
     for day, unknown in unknown_by_day.items():
         for i in unknown:
             for j in unknown + known_by_day.get(day, []):
-                if j != i and similar(i, j):
-                    uf.union(i, j)
+                if j != i:
+                    if similar(i, j):
+                        uf.union(i, j)
+                    compared += 1
+                    if progress and (
+                        compared % progress_step == 0 or compared == total_pairs
+                    ):
+                        progress(compared, total_pairs)
 
     ids: dict[int, int] = {}
     assignments: list[tuple[int, int]] = []
@@ -179,7 +202,8 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
 
 def build_groups(conn, *, session_gap_min: float = 30.0,
                  method: str = "phash", model: str | None = None,
-                 max_hamming: int = 10, cosine_threshold: float = 0.20) -> dict:
+                 max_hamming: int = 10, cosine_threshold: float = 0.20,
+                 progress: Callable[[int, int], None] | None = None) -> dict:
     """Group by session and similarity, then persist to `groups` + `group_states`."""
     assignments, meta = compute_assignments(
         conn,
@@ -188,6 +212,7 @@ def build_groups(conn, *, session_gap_min: float = 30.0,
         model=model,
         max_hamming=max_hamming,
         cosine_threshold=cosine_threshold,
+        progress=progress,
     )
     run_id = uuid.uuid4().hex[:8]
     conn.execute("DELETE FROM groups")

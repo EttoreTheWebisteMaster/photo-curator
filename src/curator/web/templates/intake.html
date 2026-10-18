@@ -1,76 +1,145 @@
 {% extends "base.html" %}
 {% block body %}
-<div x-data="intakeApp()" class="centered-page">
-    <div class="centered-card">
-        <div class="centered-card__brand">photo-curator</div>
-        <h1 class="centered-card__title">Review photos</h1>
-        <p class="centered-card__subtitle">Everything stays on your Mac. Nothing is moved until you confirm.</p>
+<main x-data="intakeApp()" class="centered-page intake-page">
+    <section class="centered-card intake-card" aria-labelledby="intake-title">
+        <div class="intake-brand">
+            <span class="intake-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 40 40">
+                    <rect x="7.5" y="7.5" width="25" height="25" rx="2"></rect>
+                    <path d="M13 26l5-6 4 4 3-3 3 5"></path>
+                    <circle cx="25.5" cy="15" r="2"></circle>
+                </svg>
+            </span>
+            <span>Photo Curator</span>
+        </div>
+
+        <header class="intake-hero">
+            <p class="intake-hero__eyebrow">A quieter way to curate</p>
+            <h1 id="intake-title" class="centered-card__title">Find the frames worth keeping.</h1>
+            <p class="centered-card__subtitle">
+                Start with a photo folder. We’ll group similar shots so you can choose your favorites, one moment at a time.
+            </p>
+        </header>
 
         {% if has_groups and pending_count > 0 %}
-        <div class="intake-warning">
-            <div class="intake-warning__title">
+        <aside class="intake-warning" aria-labelledby="intake-warning-title">
+            <div class="intake-warning__title" id="intake-warning-title">
                 You have {{ pending_count }} group{{ 's' if pending_count != 1 else '' }} in progress
             </div>
             <p class="intake-warning__body">
                 Starting a new analysis will <strong>discard your current selections</strong>.
-                Continue below to start fresh, or go back to resume.
+                Continue below to start fresh, or resume your review.
             </p>
-            <a href="{{ url_for('web.index') }}" class="btn btn--primary" style="width: auto; margin-top: var(--space-3); text-decoration: none;">
+            <a href="{{ url_for('web.index') }}" class="btn btn--ghost intake-resume">
                 <span>Resume current review</span>
-                <kbd>⏎</kbd>
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M3.5 10h12"></path>
+                    <path d="m10.5 4.5 5.5 5.5-5.5 5.5"></path>
+                </svg>
             </a>
-        </div>
+        </aside>
         {% elif review_completed %}
-        <div class="intake-notice">
-            <div class="intake-notice__title">Previous batch committed</div>
+        <aside class="intake-notice" aria-labelledby="intake-notice-title">
+            <div class="intake-notice__title" id="intake-notice-title">Your last batch is organized</div>
             <p class="intake-notice__body">
-                All set for a new batch. Add more photos to the same folder, or pick a different one.
-                <a href="/done" style="color: var(--accent);">View the last commit</a>
+                Ready for another round? Choose the same folder or start with a different one.
+                <a href="/done">See your results</a>
             </p>
-        </div>
+        </aside>
         {% endif %}
 
-        <div class="intake-form">
-            <div class="folder-drop"
-                 :class="dragOver && 'is-hover'"
-                 @dragover.prevent="dragOver = true"
-                 @dragleave.prevent="dragOver = false"
-                 @drop.prevent="onDrop($event)">
-                <div class="folder-drop__icon" aria-hidden="true">⌂</div>
-                <div class="folder-drop__text" x-show="!folder">Drop a folder here</div>
-                <div class="folder-drop__text" x-show="folder">
-                    <span class="folder-drop__path" x-text="folder"></span>
+        <form class="intake-form" @submit.prevent="analyze()">
+            <div class="intake-picker"
+                 :class="{ 'is-picking': picking, 'is-selected': folder }"
+                 aria-live="polite">
+                <div class="intake-picker__topline">
+                    <span class="intake-picker__step" aria-hidden="true">01</span>
+                    <span class="intake-picker__privacy">
+                        <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <rect x="4.5" y="8.5" width="11" height="8" rx="1.5"></rect>
+                            <path d="M7 8.5V6a3 3 0 0 1 6 0v2.5"></path>
+                        </svg>
+                        Stays on this Mac
+                    </span>
                 </div>
-                <button type="button" class="btn btn--ghost" @click="pickFolder()" :disabled="picking">
-                    <span x-text="picking ? 'Opening…' : 'Choose folder'"></span>
+
+                <div class="intake-picker__body">
+                    <span class="intake-picker__icon" aria-hidden="true">
+                        <svg viewBox="0 0 40 40">
+                            <path d="M5.5 12.5h11l3 3h15v15h-29z"></path>
+                            <path d="M5.5 12.5v-3h12l3 3"></path>
+                            <path d="M11 22h18M11 27h12"></path>
+                        </svg>
+                    </span>
+                    <div class="intake-picker__copy" x-show="!folder">
+                        <h2>Choose your photo folder</h2>
+                        <p>We’ll look for similar moments. Your photos stay right where they are.</p>
+                    </div>
+                    <div class="intake-picker__copy intake-picker__copy--selected" x-show="folder">
+                        <span class="intake-picker__selected-label">
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <path d="m3.5 8.2 2.8 2.8 6.2-6.2"></path>
+                            </svg>
+                            Folder selected
+                        </span>
+                        <h2 class="intake-picker__folder-name" x-text="folderLabel()"></h2>
+                        <p class="intake-picker__folder-path" x-text="folder"></p>
+                    </div>
+                </div>
+
+                <button type="button" class="intake-picker__button" @click="pickFolder()" :disabled="picking || submitting">
+                    <svg viewBox="0 0 20 20" aria-hidden="true" x-show="!picking">
+                        <path d="M10 13V3.5M6.5 7 10 3.5 13.5 7"></path>
+                        <path d="M4 11.5v4h12v-4"></path>
+                    </svg>
+                    <span x-text="picking ? 'Opening folder picker…' : (folder ? 'Choose a different folder' : 'Choose folder')"></span>
                 </button>
             </div>
 
+            <div class="intake-form__divider"><span>or enter a path</span></div>
+
             <div class="intake-form__row">
-                <input type="text"
+                <label class="intake-form__label" for="folder-path">Folder path</label>
+                <input id="folder-path"
+                       name="folder"
+                       type="text"
                        class="input"
-                       placeholder="or paste a path, e.g. ~/Pictures/sample"
+                       placeholder="~/Pictures/Family"
+                       aria-describedby="folder-path-help folder-path-error"
                        x-model="folder"
-                       @keydown.enter="analyze()">
+                       @keydown.enter.prevent="analyze()"
+                       :disabled="submitting">
+                <p class="intake-form__help" id="folder-path-help">Paste a path if you already know where your photos are.</p>
             </div>
 
             {% if last_folder %}
             <div class="intake-form__recent">
-                Last used: <button type="button" class="link" @click="folder = '{{ last_folder }}'">{{ last_folder }}</button>
+                <span>Recently used</span>
+                <button type="button" class="intake-recent" data-path="{{ last_folder }}"
+                        @click="folder = $el.dataset.path">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6L3.5 7.5"></path>
+                        <path d="M3.5 3.5v4h4M10 6.5V10l2.5 1.5"></path>
+                    </svg>
+                    <span>{{ last_folder }}</span>
+                    <span class="intake-recent__action">Use</span>
+                </button>
             </div>
             {% endif %}
 
-            <button type="button"
-                    class="btn btn--primary"
-                    @click="analyze()"
-                    :disabled="!folder || submitting"
-                    style="margin-top: var(--space-5);">
-                <span x-text="submitting ? 'Starting…' : 'Analyze folder'"></span>
-                <kbd>⏎</kbd>
+            <button type="submit" class="btn btn--primary intake-submit"
+                    :disabled="!folder.trim() || submitting">
+                <span x-text="submitting ? 'Preparing your review…' : 'Start photo review'"></span>
+                <svg viewBox="0 0 20 20" aria-hidden="true" x-show="!submitting">
+                    <path d="M3.5 10h12"></path>
+                    <path d="m10.5 4.5 5.5 5.5-5.5 5.5"></path>
+                </svg>
+                <span class="intake-submit__spinner" x-show="submitting" aria-hidden="true"></span>
             </button>
 
-            <p class="intake-form__error" x-show="error" x-text="error"></p>
-        </div>
-    </div>
-</div>
+            <p id="folder-path-error" class="intake-form__error" x-show="error" x-text="error" role="alert"></p>
+            <p class="intake-safety">Nothing moves until you confirm your organization plan.</p>
+        </form>
+    </section>
+</main>
 {% endblock %}

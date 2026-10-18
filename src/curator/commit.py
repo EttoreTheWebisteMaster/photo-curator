@@ -9,12 +9,14 @@ Invariants:
   - Deterministic: same DB + same filesystem state → same plan.
   - Live Photo companions (`.MOV` next to a `.HEIC` with the same stem) are
     paired and share the same destination stem.
-  - The NNN counter is per-day and shared between `_curator/winner/` and
+  - The unique-number counter is per-day and shared between `_curator/winner/` and
     `_curator/rejected/`, so a still and its companion share the same NNN.
 """
 from __future__ import annotations
 
+import re
 import shutil
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +26,26 @@ from .scan import sha256_file as _sha256_file
 
 HEIC_EXTENSIONS = {".heic", ".heif", ".HEIC", ".HEIF"}
 COMPANION_EXTS = (".MOV", ".mov")
+MAX_BATCH_NAME_LENGTH = 48
+
+
+def normalize_batch_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Use letters, numbers, spaces, hyphens, or underscores.")
+
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized:
+        return ""
+
+    safe = "".join(
+        "-" if char.isspace() else char
+        for char in normalized
+        if char.isspace() or char.isalnum() or char in "-_"
+    )
+    safe = re.sub(r"-+", "-", safe).strip("-_")[:MAX_BATCH_NAME_LENGTH].rstrip("-_")
+    if not safe:
+        raise ValueError("Use letters, numbers, spaces, hyphens, or underscores.")
+    return safe
 
 
 @dataclass
@@ -43,6 +65,7 @@ class CommitPlan:
     moves: list[Move]
     errors: list[str]
     stats: dict
+    batch_name: str | None = None
 
     @property
     def has_errors(self) -> bool:
@@ -80,10 +103,10 @@ def _existing_max_per_day(curator_root: Path) -> dict[str, int]:
             if not f.is_file():
                 continue
             parts = f.stem.split("_")
-            if len(parts) != 3:
+            if len(parts) < 2 or len(parts[0]) != 8 or not parts[0].isdigit():
                 continue
-            day, _time, nnn = parts
-            if len(day) != 8 or not day.isdigit() or not nnn.isdigit():
+            day, nnn = parts[0], parts[-1]
+            if not nnn.isdigit():
                 continue
             n = int(nnn)
             if n > out.get(day, 0):
@@ -152,7 +175,10 @@ def _collect_candidates(conn, source_root: Path) -> tuple[list[tuple[dict, str]]
     return candidates, errors
 
 
-def plan_commit(conn, source_root: Path) -> CommitPlan:
+def plan_commit(conn, source_root: Path, batch_name: str | None = None) -> CommitPlan:
+    if batch_name is not None:
+        batch_name = normalize_batch_name(batch_name)
+
     source_root = source_root.resolve()
     curator_root = source_root / "_curator"
 
@@ -186,7 +212,13 @@ def plan_commit(conn, source_root: Path) -> CommitPlan:
                 time_part = datetime.fromisoformat(taken).strftime("%H%M%S")
             except ValueError:
                 time_part = "000000"
-            stem = f"{day}_{time_part}_{next_nnn:03d}"
+            stem = (
+                f"{day}_{batch_name}_{next_nnn:03d}"
+                if batch_name
+                else f"{day}_{next_nnn:03d}"
+                if batch_name is not None
+                else f"{day}_{time_part}_{next_nnn:03d}"
+            )
             dst_dir = curator_root / ("winner" if role == "winner" else "rejected")
             dst = dst_dir / (stem + src.suffix)
 
@@ -229,14 +261,15 @@ def plan_commit(conn, source_root: Path) -> CommitPlan:
         "curator_root": str(curator_root),
         "source_root": str(source_root),
     }
-    return CommitPlan(source_root, curator_root, moves, errors, stats)
+    return CommitPlan(source_root, curator_root, moves, errors, stats, batch_name)
 
 
-def plan_to_dict(plan: CommitPlan, sample_limit: int = 20) -> dict:
+def plan_to_dict(plan: CommitPlan, sample_limit: int = 100) -> dict:
     return {
         "stats": plan.stats,
         "errors": plan.errors,
         "has_errors": plan.has_errors,
+        "batch_name": plan.batch_name,
         "sample": [
             {"src": str(m.src_path), "dst": str(m.dst_path),
              "role": m.role, "companion_of": m.companion_of}

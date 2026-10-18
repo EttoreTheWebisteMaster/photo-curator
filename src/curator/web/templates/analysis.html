@@ -1,60 +1,131 @@
 {% extends "base.html" %}
 {% block body %}
-<div x-data="analysisApp()" x-init="start()" class="centered-page">
-    <div class="centered-card">
-        <div class="centered-card__brand">Analyzing</div>
-        <h1 class="centered-card__title" x-text="state.folder || 'Preparing…'"></h1>
+<main x-data="analysisApp()" x-init="start()" class="analysis-page">
+    <section class="analysis-card" aria-labelledby="analysis-title">
+        <a class="analysis-brand" href="{{ url_for('web.intake') }}" aria-label="Photo Curator home">
+            <span class="analysis-brand__mark" aria-hidden="true">
+                <svg viewBox="0 0 28 28" fill="none">
+                    <rect x="3.5" y="5.5" width="15" height="17" rx="2.5" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M9 9.5h4M9 13h4M9 16.5h4M19 10.5h2a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </span>
+            <span>Photo Curator</span>
+        </a>
 
-        <ul class="checklist">
-            <template x-for="task in state.tasks" :key="task.id">
-                <li class="checklist-item" :class="'checklist-item--' + task.status">
-                    <span class="checklist-item__icon" aria-hidden="true">
-                        <template x-if="task.status === 'done'">✓</template>
-                        <template x-if="task.status === 'running'"></template>
-                        <template x-if="task.status === 'pending'">○</template>
-                        <template x-if="task.status === 'error'">✕</template>
-                    </span>
-                    <span class="checklist-item__body">
-                        <span class="checklist-item__label" x-text="task.label"></span>
-                        <span class="checklist-item__meta">
-                            <template x-if="task.id === 'scan' && task.total > 0">
-                                <span x-text="task.count + ' / ' + task.total + ' · ' + task.eta_label"></span>
-                            </template>
-                            <template x-if="task.summary">
-                                <span x-text="task.summary"></span>
-                            </template>
-                        </span>
-                    </span>
+        <header class="analysis-heading">
+            <p class="analysis-kicker">
+                <span class="analysis-kicker__dot" :class="{ 'analysis-kicker__dot--done': !state.running && state.final }"></span>
+                <span x-text="state.running ? 'Preparing your review' : state.final?.mode === 'cancelled' ? 'Analysis paused' : 'Your review is ready'"></span>
+            </p>
+            <h1 id="analysis-title">Getting your photos ready</h1>
+            <p class="analysis-intro">We’re organizing similar shots into groups. Your original photos stay untouched.</p>
+            <p class="analysis-folder" x-show="state.folder" :title="state.folder">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <path d="M2.75 5.75A1.75 1.75 0 0 1 4.5 4h3l1.6 1.75h6.4a1.75 1.75 0 0 1 1.75 1.75v6.75A1.75 1.75 0 0 1 15.5 16h-11a1.75 1.75 0 0 1-1.75-1.75z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+                </svg>
+                <span x-text="state.folder"></span>
+            </p>
+        </header>
+
+        <section class="analysis-summary" aria-label="Overall analysis progress">
+            <div class="analysis-summary__line">
+                <span class="analysis-summary__label" x-text="state.running ? 'Overall progress' : state.final ? 'Ready to continue' : 'Analysis status'"></span>
+                <span class="analysis-summary__value" x-text="state.running ? overallPercent + '%' : state.final ? 'Complete' : 'Connecting…'"></span>
+            </div>
+            <div class="analysis-progress" role="progressbar" aria-label="Overall analysis progress"
+                 aria-valuemin="0" aria-valuemax="100"
+                 :aria-valuenow="overallPercent">
+                <div class="analysis-progress__bar"
+                     :class="{ 'analysis-progress__bar--done': !state.running && state.final?.mode !== 'cancelled' }"
+                     :style="`width: ${overallPercent}%`"></div>
+            </div>
+            <p class="analysis-summary__elapsed" aria-live="off">
+                <span class="analysis-summary__pulse" x-show="state.running"></span>
+                <span x-text="overallTimeLabel"></span>
+            </p>
+        </section>
+
+        <ol class="analysis-steps" aria-label="Analysis steps">
+            <template x-for="(task, index) in state.tasks" :key="task.id">
+                <li class="analysis-step" :class="'analysis-step--' + task.status">
+                    <div class="analysis-step__icon" aria-hidden="true">
+                        <template x-if="task.status === 'done'">
+                            <svg viewBox="0 0 20 20" fill="none">
+                                <path d="m5 10.2 3.2 3.2L15.5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </template>
+                        <template x-if="task.status === 'running'">
+                            <svg class="analysis-step__spinner" viewBox="0 0 20 20" fill="none">
+                                <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2"/>
+                                <path d="M10 3a7 7 0 0 1 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            </svg>
+                        </template>
+                        <template x-if="task.status === 'pending'">
+                            <svg viewBox="0 0 20 20" fill="none">
+                                <circle cx="10" cy="10" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+                            </svg>
+                        </template>
+                        <template x-if="task.status === 'error'">
+                            <svg viewBox="0 0 20 20" fill="none">
+                                <path d="m6 6 8 8m0-8-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            </svg>
+                        </template>
+                    </div>
+                    <div class="analysis-step__content">
+                        <div class="analysis-step__topline">
+                            <div class="analysis-step__title">
+                                <span class="analysis-step__number" x-text="String(index + 1).padStart(2, '0')"></span>
+                                <h2 x-text="task.label"></h2>
+                            </div>
+                            <span class="analysis-step__state" x-text="task.status === 'done' ? 'Complete' : task.status === 'running' ? 'In progress' : task.status === 'error' ? 'Needs attention' : 'Up next'"></span>
+                        </div>
+                        <p class="analysis-step__description" x-text="task.description"></p>
+                        <div class="analysis-step__progress" role="progressbar"
+                             :aria-label="task.label"
+                             aria-valuemin="0" aria-valuemax="100"
+                             :aria-valuenow="task.total > 0 || task.status === 'done' ? taskProgress(task) : null"
+                             :aria-valuetext="taskProgressText(task)">
+                            <div class="analysis-step__bar"
+                                 :class="{
+                                    'analysis-step__bar--done': task.status === 'done',
+                                    'analysis-step__bar--error': task.status === 'error',
+                                    'analysis-step__bar--indeterminate': task.status === 'running' && task.total <= 0
+                                 }"
+                                 :style="task.status === 'running' && task.total <= 0 ? '' : `width: ${taskProgress(task)}%`"></div>
+                        </div>
+                        <div class="analysis-step__meta">
+                            <span class="analysis-step__count" x-text="taskProgressText(task)"></span>
+                            <span class="analysis-step__time" x-text="taskTimeLabel(task)"></span>
+                        </div>
+                    </div>
                 </li>
             </template>
-        </ul>
+        </ol>
 
-        <div class="analysis-progress">
-            <div class="analysis-progress__bar" :style="`width: ${overallPercent}%`"></div>
-        </div>
-
-        <p class="analysis-error" x-show="state.error" x-text="state.error"></p>
+        <p class="analysis-error" role="alert" x-show="state.error" x-text="state.error"></p>
 
         <div class="analysis-actions">
-            <button type="button"
-                    class="btn btn--ghost"
-                    @click="cancel()"
-                    x-show="state.running">
-                Cancel
+            <button type="button" class="btn btn--ghost" @click="cancel()" x-show="state.running">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <path d="M6.5 6.5h7v7h-7z" fill="currentColor"/>
+                </svg>
+                Cancel analysis
             </button>
-            <a href="{{ url_for('web.index') }}"
-               class="btn btn--primary"
-               x-show="!state.running && state.final"
-               style="width: auto;">
+            <a href="{{ url_for('web.index') }}" class="btn btn--primary"
+               x-show="!state.running && state.final && state.final.mode !== 'cancelled'">
                 <span x-text="state.final?.mode === 'no_changes' ? 'Resume review' : 'Start reviewing'"></span>
-                <kbd>⏎</kbd>
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <path d="M4 10h11m-4-4 4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
             </a>
-            <a href="{{ url_for('web.intake') }}"
-               class="btn btn--ghost"
-               x-show="!state.running && !state.final">
-                Back
+            <a href="{{ url_for('web.intake') }}" class="btn btn--ghost"
+               x-show="!state.running && (!state.final || state.final.mode === 'cancelled')">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <path d="M15.5 10h-11m4 4-4-4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span x-text="state.final?.mode === 'cancelled' ? 'Choose another folder' : 'Back to folder selection'"></span>
             </a>
         </div>
     </div>
-</div>
+</main>
 {% endblock %}

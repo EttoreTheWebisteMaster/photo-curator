@@ -8,36 +8,49 @@
 </script>
 <div x-data="doneApp()" @keydown.window="onKey($event)" class="centered-page">
     <div class="centered-card centered-card--wide">
-        <div class="done-hero">
-            <div class="done-hero__check" aria-hidden="true">✓</div>
-            <h1 class="done-hero__title">All organized</h1>
+        <header class="done-hero">
+            <div class="done-hero__check" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                    <path d="m5 12.5 4.5 4.5L19 7"></path>
+                </svg>
+            </div>
+            <p class="done-hero__eyebrow">Review complete</p>
+            <h1 class="done-hero__title">Your photo library is in order.</h1>
             <p class="done-hero__subtitle">
-                Your photos are in their new home. Originals are never deleted.
+                <span x-text="organizedSummary()"></span>
             </p>
-        </div>
+        </header>
 
-        <dl class="impact__grid impact__grid--2">
+        <section class="done-impact" aria-labelledby="done-impact-title">
+            <p class="done-impact__label" id="done-impact-title">Space organized</p>
+            <p class="done-impact__value" x-text="formatSize(totalBytes())"></p>
+            <p class="done-impact__note">
+                Moved into your Keepers and Rejected folders. Nothing was deleted, so available disk space is unchanged.
+            </p>
+        </section>
+
+        <dl class="done-breakdown">
             <div>
-                <dt>Kept</dt>
-                <dd x-text="stats.winner?.count || 0"></dd>
-                <div class="impact__sub" x-text="formatSize(stats.winner?.bytes || 0)"></div>
+                <dt>Keepers</dt>
+                <dd x-text="formatCount(stats.winner?.count || 0)"></dd>
+                <span x-text="formatSize(stats.winner?.bytes || 0)"></span>
             </div>
             <div>
                 <dt>Rejected</dt>
-                <dd x-text="stats.rejected?.count || 0"></dd>
-                <div class="impact__sub" x-text="formatSize(stats.rejected?.bytes || 0)"></div>
+                <dd x-text="formatCount(stats.rejected?.count || 0)"></dd>
+                <span x-text="formatSize(stats.rejected?.bytes || 0)"></span>
             </div>
         </dl>
 
         <div class="done-actions">
-            <a href="/intake" class="btn btn--primary" style="text-decoration: none; justify-content: center;">
-                <span>Start over</span>
+            <a href="/intake" class="btn btn--primary">
+                <span>Curate another folder</span>
                 <kbd>N</kbd>
             </a>
         </div>
         <div class="done-actions-secondary">
             <button type="button" class="btn btn--ghost" @click="openFolder()">
-                Open folder
+                Open Keepers folder
             </button>
             <button type="button" class="btn btn--danger" @click="undoEverything()" :disabled="undoing">
                 <span x-text="undoing ? 'Restoring…' : 'Undo everything'"></span>

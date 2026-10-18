@@ -8,121 +8,210 @@
 </script>
 
 <div x-data="confirmApp()" x-init="load()" class="app app--confirm">
-    <aside class="sidebar" aria-label="Summary">
-        <header class="sidebar__header">
-            <div class="sidebar__label">Ready to organize</div>
-        </header>
-        <div style="padding: var(--space-4); font-size: 12px; color: var(--text-tertiary); line-height: 1.6;">
-            <p style="margin: 0;">
-                This is a <strong style="color: var(--text-primary);">dry-run</strong>.
-                Nothing is moved until you press <em>Confirm &amp; organize</em>.
-            </p>
-            <p style="margin-top: var(--space-3); margin-bottom: var(--space-1);">
-                Destination
-            </p>
-            <span style="display: block; font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); word-break: break-all;"
-                  x-text="data.stats?.curator_root || '—'"></span>
-        </div>
-    </aside>
+    {% include "product_bar.html" %}
 
     <main class="main">
-        <div class="main__inner">
-            <header class="main__header">
+        <div class="main__inner confirm-main">
+            <header class="confirm-header">
                 <div>
                     <div class="main__label">Final review</div>
-                    <div class="main__title">Confirm &amp; organize</div>
+                    <h1 class="main__title">Review your organization plan</h1>
+                    <p class="confirm-header__intro">Review the destination and filename format before organizing.</p>
                 </div>
-                <div class="main__meta" x-show="!loading && !data.errors?.length && data.stats?.total_moves > 0">
-                    <span x-text="data.stats.total_moves"></span> files
+                <div class="confirm-status" role="status">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <circle cx="10" cy="10" r="7"></circle>
+                        <path d="M10 6v4l2.5 1.5"></path>
+                    </svg>
+                    Nothing moved yet
                 </div>
             </header>
 
             <template x-if="loading">
-                <div class="empty-state">
-                    <div class="empty-state__hint">Building plan…</div>
+                <div class="confirm-loading" role="status" aria-live="polite">
+                    <span class="confirm-loading__spinner" aria-hidden="true"></span>
+                    <span>Preparing your file plan…</span>
+                    <span class="confirm-loading__line"></span>
                 </div>
             </template>
 
             <template x-if="!loading && data.errors && data.errors.length > 0">
-                <div class="impact impact--error">
-                    <div class="impact__title">Cannot commit yet</div>
-                    <ul style="margin: var(--space-3) 0 0; padding-left: var(--space-5); color: var(--status-reject); font-size: 13px; line-height: 1.7;">
+                <section class="confirm-error" role="alert" aria-labelledby="confirm-error-title">
+                    <div class="confirm-error__icon" aria-hidden="true">!</div>
+                    <div>
+                        <h2 id="confirm-error-title">We couldn’t prepare the plan</h2>
+                        <p>Resolve these issues, then return to the review.</p>
+                    </div>
+                    <ul>
                         <template x-for="err in data.errors" :key="err">
                             <li x-text="err"></li>
                         </template>
                     </ul>
-                    <div style="margin-top: var(--space-4);">
-                        <a href="/" class="btn btn--ghost" style="width: auto; text-decoration: none;">Back to review</a>
-                    </div>
-                </div>
+                    <a href="/" class="btn btn--ghost confirm-error__back">
+                        <span class="btn__label">
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M16.5 10h-12"></path>
+                                <path d="M9.5 4.5 4 10l5.5 5.5"></path>
+                            </svg>
+                            Back to photo review
+                        </span>
+                    </a>
+                </section>
             </template>
 
             <template x-if="!loading && !data.errors?.length && data.stats?.total_moves === 0">
-                <div class="empty-state">
-                    <div class="empty-state__icon" aria-hidden="true">✓</div>
-                    <div class="empty-state__title">Nothing to organize</div>
-                    <div class="empty-state__hint">All groups and rejected photos are already decided.</div>
-                </div>
+                <section class="confirm-empty" aria-labelledby="confirm-empty-title">
+                    <div class="confirm-empty__icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <path d="m5 12.5 4.5 4.5L19 7"></path>
+                        </svg>
+                    </div>
+                    <h2 id="confirm-empty-title">Nothing to organize</h2>
+                    <p>No files are waiting to move. Your photos are right where you left them.</p>
+                    <a href="/" class="btn btn--ghost">
+                        <span class="btn__label">
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M16.5 10h-12"></path>
+                                <path d="M9.5 4.5 4 10l5.5 5.5"></path>
+                            </svg>
+                            Back to photo review
+                        </span>
+                    </a>
+                </section>
             </template>
 
             <template x-if="!loading && !data.errors?.length && data.stats?.total_moves > 0">
-                <div>
-                    <dl class="impact__grid impact__grid--4">
-                        <div><dt>Kept</dt><dd x-text="data.stats.winner"></dd></div>
-                        <div><dt>Rejected</dt><dd x-text="data.stats.rejected"></dd></div>
-                        <div><dt>Live Photos</dt><dd x-text="data.stats.companion || 0"></dd></div>
-                        <div><dt>Size</dt><dd x-text="formatSize(data.stats.total_size)"></dd></div>
-                    </dl>
-
-                    <div class="plan-preview">
-                        <div class="plan-preview__title">Preview · first 20 renames</div>
-                        <table class="plan-table">
-                            <thead>
-                                <tr><th>From</th><th></th><th>To</th></tr>
-                            </thead>
-                            <tbody>
-                                <template x-for="m in data.sample" :key="m.src + m.dst">
-                                    <tr>
-                                        <td class="plan-table__path" x-text="basename(m.src)"></td>
-                                        <td class="plan-table__arrow">→</td>
-                                        <td class="plan-table__path" x-text="basename(m.dst)"></td>
-                                    </tr>
-                                </template>
-                            </tbody>
-                        </table>
-                        <div x-show="data.stats.total_moves > data.sample.length" class="plan-preview__more">
-                            …and <span x-text="data.stats.total_moves - data.sample.length"></span> more
+                <div class="confirm-plan">
+                    <section class="confirm-destination-inline" aria-labelledby="confirm-destination-inline-title">
+                        <span class="confirm-destination-inline__label" id="confirm-destination-inline-title">Where your files will go</span>
+                        <div class="confirm-destination-inline__paths">
+                            <div><span>From</span><code x-text="data.stats.source_root"></code></div>
+                            <div><span>To</span><code x-text="data.stats.curator_root"></code></div>
                         </div>
-                    </div>
+                        <p>Confirming moves files into separate <code>winner</code> and <code>rejected</code> folders here. Nothing is deleted.</p>
+                    </section>
+                    <section class="commit-summary" aria-label="Files to organize">
+                        <div class="commit-summary__total">
+                            <span>Files to organize</span>
+                            <strong x-text="data.stats.total_moves"></strong>
+                            <span class="commit-summary__size" x-text="formatSize(data.stats.total_size) + ' total'"></span>
+                        </div>
+                        <dl class="commit-summary__counts">
+                            <div>
+                                <dt>Keepers</dt>
+                                <dd x-text="data.stats.winner"></dd>
+                                <span class="commit-summary__percentage" x-text="percentage(data.stats.winner) + ' of files'"></span>
+                            </div>
+                            <div>
+                                <dt>Rejected</dt>
+                                <dd x-text="data.stats.rejected"></dd>
+                                <span class="commit-summary__percentage" x-text="percentage(data.stats.rejected) + ' of files'"></span>
+                            </div>
+                            <div>
+                                <dt>Live Photo files</dt>
+                                <dd x-text="data.stats.companion || 0"></dd>
+                                <span class="commit-summary__percentage" x-text="percentage(data.stats.companion || 0) + ' of files'"></span>
+                            </div>
+                        </dl>
+                    </section>
+
+                    <section class="plan-preview" aria-labelledby="plan-preview-title">
+                        <header class="plan-preview__header">
+                            <div>
+                                <h2 id="plan-preview-title">File names</h2>
+                                <p>Photos are renamed when you confirm. Their original extensions are kept.</p>
+                            </div>
+                        </header>
+                        <div class="batch-name">
+                            <label for="batch-name">Optional name added to each file</label>
+                            <input id="batch-name" type="text" maxlength="48"
+                                   autocomplete="off" autocapitalize="off"
+                                   placeholder="e.g. Summer Trip"
+                                   :value="batchName"
+                                   @input="updateBatchName($event.target.value)"
+                                   aria-describedby="batch-name-help batch-name-error"
+                                   :aria-invalid="batchNameError ? 'true' : 'false'"
+                                   :disabled="executing">
+                            <p id="batch-name-help">Leave blank to use only the date and number. Spaces become hyphens.</p>
+                            <p id="batch-name-error" class="batch-name__error" x-show="batchNameError" x-text="batchNameError" role="alert"></p>
+                            <p class="batch-name__updating" x-show="previewUpdating" role="status">Updating the file-name preview…</p>
+                            <div class="batch-name__example">
+                                <span>Example filename</span>
+                                <code x-text="exampleFileName()" aria-live="polite"></code>
+                            </div>
+                        </div>
+                        <p class="plan-preview__note">Each file gets its own number. Live Photo companions share their photo’s name and number.</p>
+                    </section>
                 </div>
             </template>
         </div>
     </main>
 
-    <aside class="detail" aria-label="Action">
+    <aside class="detail confirm-actions" aria-label="Confirmation and destination">
         <div class="detail__inner">
             <header class="detail__header">
-                <div class="detail__label">Action</div>
+                <div class="detail__label">Before you organize</div>
             </header>
-            <div style="padding: var(--space-4); flex: 1;">
-                <p style="font-size: 12px; color: var(--text-tertiary); line-height: 1.6; margin: 0;">
-                    Files will be moved and renamed. Originals are never deleted. A manifest is saved so you can undo.
+            <div class="confirm-actions__content">
+                <section class="confirm-destination" aria-labelledby="confirm-destination-title">
+            <h2 id="confirm-destination-title">From your source folder</h2>
+            <code x-text="data.stats?.source_root || 'Loading source folder…'"></code>
+            <div class="confirm-destination__next">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M10 2.5v14"></path>
+                    <path d="m4.5 11 5.5 5.5 5.5-5.5"></path>
+                </svg>
+                <span>Into this new folder</span>
+            </div>
+            <code x-text="data.stats?.curator_root || 'Loading destination…'"></code>
+            <p class="confirm-destination__explanation">
+                Inside it, <code>winner/</code> holds selected photos and <code>rejected/</code> holds the rest.
+            </p>
+                </section>
+                <p class="confirm-actions__intro">After you confirm:</p>
+                <ul class="confirm-checklist">
+            <li>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
+                Files are renamed using the example above and moved into the folders shown here.
+            </li>
+                    <li>
+                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
+                        Photos are moved, not deleted.
+                    </li>
+                    <li>
+                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.5 4 4 8-9"></path></svg>
+                        An undo record is saved.
+                    </li>
+                </ul>
+                <p class="confirm-safety">
+                    Nothing has moved yet. <strong>Confirm &amp; organize</strong> starts the move; you can undo it afterward.
                 </p>
             </div>
             <footer class="detail__footer">
                 <button type="button"
-                    class="btn btn--primary"
-                    @click="execute()"
-                    :disabled="loading || data.errors?.length > 0 || !data.stats?.total_moves || executing">
-                <span x-text="executing
-                    ? (commitProgress
-                        ? commitProgress.count + ' / ' + commitProgress.total + ' files…'
-                        : 'Starting…')
-                    : 'Confirm & organize'"></span>
-                <kbd x-show="!executing">⏎</kbd>
-            </button>
-                <a href="/" class="btn btn--danger" style="text-decoration: none; text-align: center; justify-content: center;">
-                    Back to review
+                        class="btn btn--primary"
+                        @click="execute()"
+                        :disabled="loading || previewUpdating || batchNameError || data.errors?.length > 0 || !data.stats?.total_moves || executing">
+                    <span class="btn__label">
+                        <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true" x-show="!executing">
+                            <path d="m4 10.5 4 4 8-9"></path>
+                        </svg>
+                        <span x-text="executing
+                            ? (commitProgress
+                                ? commitProgress.count + ' / ' + commitProgress.total + ' files…'
+                                : 'Starting…')
+                            : 'Confirm & organize'"></span>
+                    </span>
+                    <kbd x-show="!executing">⏎</kbd>
+                </button>
+                <a href="/" class="btn btn--ghost">
+                    <span class="btn__label">
+                        <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M16.5 10h-12"></path>
+                            <path d="M9.5 4.5 4 10l5.5 5.5"></path>
+                        </svg>
+                        Back to review
+                    </span>
                 </a>
             </footer>
         </div>

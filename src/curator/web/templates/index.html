@@ -14,28 +14,46 @@
 
 <div x-data="curatorApp()" @keydown.window="onKey($event)" class="app"
      :style="`--sidebar-w: ${sidebarWidth}px; --detail-w: ${detailWidth}px`">
+    {% set use_workspace_shortcuts = true %}
+    {% include "product_bar.html" %}
 
     <!-- SIDEBAR -->
     <aside class="sidebar" aria-label="Groups">
-        <header class="sidebar__header">
-            <div class="sidebar__label">Groups</div>
-            <div x-show="pendingCount > 0" class="sidebar__counter">
-                <span class="sidebar__counter-value" x-text="pendingCount"></span>
-                <span class="sidebar__counter-label">to review</span>
-            </div>
-            <div x-show="pendingCount === 0" class="sidebar__counter">
-                <span class="sidebar__counter-value sidebar__counter-value--done">✓</span>
-                <span class="sidebar__counter-label">all done</span>
-            </div>
-            <div class="ring" role="progressbar" :aria-valuenow="ringPercent" aria-valuemin="0" aria-valuemax="100">
-                <svg viewBox="0 0 40 40" width="40" height="40">
-                    <circle class="ring__track" cx="20" cy="20" r="16"></circle>
-                    <circle class="ring__fill" cx="20" cy="20" r="16"
-                            :stroke-dasharray="100.53"
-                            :stroke-dashoffset="ringOffset"></circle>
-                </svg>
-                <span class="ring__value" x-text="ringPercent + '%'"></span>
-            </div>
+        <header class="sidebar__header" :class="{ 'sidebar__header--complete': reviewFinished }">
+            <template x-if="!reviewFinished">
+                <div class="sidebar__progress">
+                    <div class="sidebar__label">Your groups</div>
+                    <div class="sidebar__counter">
+                        <span class="sidebar__counter-value" x-text="pendingCount"></span>
+                        <span class="sidebar__counter-label">to review</span>
+                    </div>
+                    <div class="ring" role="progressbar" :aria-valuenow="ringPercent"
+                         aria-valuemin="0" aria-valuemax="100"
+                         :aria-label="ringPercent + '% of photo groups reviewed'">
+                        <svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">
+                            <circle class="ring__track" cx="20" cy="20" r="16"></circle>
+                            <circle class="ring__fill" cx="20" cy="20" r="16"
+                                    :stroke-dasharray="100.53"
+                                    :stroke-dashoffset="ringOffset"></circle>
+                        </svg>
+                        <span class="ring__value" x-text="ringPercent + '%'"></span>
+                    </div>
+                </div>
+            </template>
+            <template x-if="reviewFinished">
+                <div class="sidebar__complete">
+                    <a class="sidebar__next-step" :href="completionNextStep.href">
+                        <span x-text="completionNextStep.title"></span>
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                            <path d="M4 10h11m-4-4 4 4-4 4" stroke="currentColor" stroke-width="1.6"
+                                  stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </a>
+                    <p class="sidebar__complete-note">
+                        <strong x-text="ringPercent + '%'"></strong> of photo groups reviewed
+                    </p>
+                </div>
+            </template>
         </header>
 
         <nav class="sidebar__list">
@@ -51,6 +69,8 @@
                     :x-ref="'group-' + group.id"
                     @click="select(group.id)"
                     :aria-current="selectedId === group.id ? 'true' : null"
+                    :aria-label="'Group ' + group.id + ', ' + group.photo_count + ' photos, ' +
+                        (group.status === 'completed' ? 'reviewed' : group.status === 'deleted' ? 'removed' : 'to review')"
                 >
                     <span class="group-row__thumb-wrap">
                         <img class="group-row__thumb" :src="winnerThumb(group)" alt="" loading="lazy">
@@ -58,7 +78,9 @@
                     </span>
                     <span class="group-row__body">
                         <span class="group-row__title" x-text="'Group ' + group.id"></span>
-                        <span class="group-row__meta" x-text="formatDate(group.taken_at)"></span>
+                        <span class="group-row__meta"
+                              x-text="formatDate(group.taken_at) +
+                                  (group.status === 'completed' ? ' · Reviewed' : group.status === 'deleted' ? ' · Removed' : '')"></span>
                     </span>
                     <span class="group-row__count"
                         x-text="group.photo_count"
@@ -88,83 +110,131 @@
         </template>
 
         <template x-if="selectedGroup && selectedGroup.status === 'deleted'">
-            <div class="empty-state">
-                <div class="empty-state__icon" aria-hidden="true">⌫</div>
-                <div class="empty-state__title" x-text="'Group ' + selectedGroup.id + ' deleted'"></div>
-                <div class="empty-state__hint">Photos are still on disk. Restore to review them again.</div>
-                <button type="button" class="btn btn--ghost" @click="restoreGroup()">Restore group</button>
-            </div>
+            <section class="deleted-state" aria-labelledby="deleted-state-title">
+                <div class="deleted-state__gallery">
+                    <figure class="deleted-state__selected">
+                        <template x-if="currentWinner">
+                            <img :src="currentWinner.thumb || currentWinner.url"
+                                 :alt="photoLabel(currentWinner) + ', selected keeper'">
+                        </template>
+                        <template x-if="!currentWinner">
+                            <div class="deleted-state__placeholder" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none">
+                                    <rect x="3.5" y="5.5" width="17" height="13" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                                    <circle cx="9" cy="10" r="1.5" stroke="currentColor" stroke-width="1.5"/>
+                                    <path d="m5 16 4-4 3 3 2.5-2.5L19 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </div>
+                        </template>
+                        <figcaption>
+                            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path d="m3.5 8.2 2.8 2.8 6.2-6.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span x-text="currentWinner ? 'Selected keeper' : 'No keeper selected'"></span>
+                        </figcaption>
+                    </figure>
+                    <div class="deleted-state__others">
+                        <span class="deleted-state__others-label">Other shots</span>
+                        <div class="deleted-state__filmstrip" role="list" tabindex="0"
+                             aria-label="Other photos in this group">
+                            <template x-for="photo in rejectedPhotos" :key="photo.id">
+                                <figure class="deleted-state__thumbnail" role="listitem"
+                                        :aria-label="'Not selected: ' + photoLabel(photo)">
+                                    <img :src="photo.thumb || photo.url" alt="" loading="lazy">
+                                </figure>
+                            </template>
+                            <p class="deleted-state__no-others" x-show="rejectedPhotos.length === 0">
+                                No other photos in this group.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="deleted-state__content">
+                    <p class="deleted-state__eyebrow" x-text="'Group ' + selectedGroup.id + ' · removed from review'"></p>
+                    <h1 class="deleted-state__title" id="deleted-state-title"
+                        x-text="currentWinner ? 'Your selected photo is still here' : 'This group is ready to review'"></h1>
+                    <p class="deleted-state__description"
+                       x-text="currentWinner
+                           ? 'Your keeper is saved. Restore this group to review the other shots and continue organizing.'
+                           : 'Restore this group to choose a keeper and review its photos again.'"></p>
+                    <button type="button" class="btn btn--primary deleted-state__restore" @click="restoreGroup()">
+                    <span class="btn__label">
+                        <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M4 8a6.5 6.5 0 1 1-.3 4"></path>
+                            <path d="M4 3.5V8h4.5"></path>
+                        </svg>
+                        Restore group to review
+                    </span>
+                    </button>
+                    <p class="deleted-state__note">Your photos are still on disk. Restoring does not move or delete them.</p>
+                </div>
+            </section>
         </template>
 
         <template x-if="selectedGroup && selectedGroup.status !== 'deleted'">
             <div class="main__inner">
                 <header class="main__header">
                     <div>
-                        <div class="main__label">Rejected</div>
-                        <div class="main__title" x-text="'Group ' + selectedGroup.id"></div>
+                        <div class="main__label">Compare these shots</div>
+                        <h1 class="main__title" x-text="'Group ' + selectedGroup.id"></h1>
                     </div>
-                    <div class="main__meta" x-text="rejectedPhotos.length + (rejectedPhotos.length === 1 ? ' photo' : ' photos') + ' · click to promote'"></div>
+                    <div class="main__meta">
+                        <span x-text="comparisonPhotos.length + (comparisonPhotos.length === 1 ? ' photo' : ' photos')"></span>
+                        <span class="main__meta-hint main__meta-hint--desktop">Choose another frame to change your pick</span>
+                        <span class="main__meta-hint main__meta-hint--mobile">Swipe to compare</span>
+                    </div>
                 </header>
 
-                <template x-if="rejectedPhotos.length === 0">
+                <template x-if="comparisonPhotos.length === 0">
                     <div class="empty-state empty-state--sm">
-                        <div class="empty-state__hint">No rejected photos in this group.</div>
+                        <div class="empty-state__hint">No photos in this group.</div>
                     </div>
                 </template>
 
-                <div class="grid" x-show="rejectedPhotos.length > 0">
-                    <template x-for="(photo, idx) in rejectedPhotos" :key="photo.id">
-                        <button
-                            type="button"
-                            class="thumb"
-                            @click="promotePhoto(photo.id)"
-                            @dblclick.stop="openLightbox(photo.id)"
-                            :title="'Promote (press ' + (idx + 1) + ')'"
-                        >
-                            <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy">
-                            <img class="detail__img"
-                            :src="w.url"
-                            @click="openLightbox(w.id)"
-                            style="cursor: zoom-in;"
-                            alt="">
-                            <span class="thumb__index" x-text="idx + 1"></span>
-                            <span class="thumb__meta" aria-hidden="true">
-                                <span>Sharpness <strong x-text="Math.round(photo.sharpness)"></strong></span>
-                                <span>Exposure <strong x-text="Math.round(photo.exposure * 100) + '%'"></strong></span>
-                            </span>
-                        </button>
+                <div class="grid" x-show="comparisonPhotos.length > 0">
+                    <template x-for="photo in comparisonPhotos" :key="photo.id">
+                        <article class="photo-card"
+                                 :class="{ 'photo-card--selected': photo.id === selectedDetail.current_winner }">
+                            <button type="button" class="photo-card__preview" @click="openLightbox(photo.id)"
+                                    :aria-label="'View ' + photoLabel(photo) + ' full size'">
+                                <img class="photo-card__image" :src="photo.thumb" alt="" loading="lazy">
+                                <span class="photo-card__zoom" aria-hidden="true">
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                    <circle cx="8.5" cy="8.5" r="5.5"></circle>
+                                    <path d="m13 13 4 4"></path>
+                                </svg>
+                                </span>
+                            </button>
+                            <footer class="photo-card__footer">
+                                <div class="photo-card__facts">
+                                    <span class="photo-card__name" x-text="photoLabel(photo)"></span>
+                                    <span class="photo-card__metrics">
+                                        <span>Sharpness <strong x-text="Math.round(photo.sharpness)"></strong></span>
+                                        <span>Exposure <strong x-text="Math.round(photo.exposure * 100) + '%'"></strong></span>
+                                    </span>
+                                </div>
+                                <template x-if="photo.id === selectedDetail.current_winner">
+                                    <span class="photo-card__selected-label" role="status">
+                                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                                            <path d="m3.5 8.2 2.8 2.8 6.2-6.2"></path>
+                                        </svg>
+                                        Selected
+                                    </span>
+                                </template>
+                                <template x-if="photo.id !== selectedDetail.current_winner">
+                                    <button type="button" class="photo-card__choose"
+                                            @click="promotePhoto(photo.id)"
+                                            :aria-label="'Choose ' + photoLabel(photo) + ' as the winner'">
+                                        Choose
+                                    </button>
+                                </template>
+                            </footer>
+                        </article>
                     </template>
                 </div>
             </div>
         </template>
 
-        <template x-if="selectedGroup && pendingCount === 0">
-            <div class="impact">
-                <div class="impact__title">All groups reviewed</div>
-                <dl class="impact__grid">
-                    <div><dt>Kept</dt><dd x-text="groups.filter(g => g.status === 'completed').length"></dd></div>
-                    <div><dt>Deleted</dt><dd x-text="groups.filter(g => g.status === 'deleted').length"></dd></div>
-                    <div><dt>Total</dt><dd x-text="groups.length"></dd></div>
-                </dl>
-                <p class="impact__note">
-                    Rejected photos are still on disk. Nothing has been moved yet.
-                </p>
-                <div style="display: flex; gap: var(--space-3); margin-top: var(--space-4); flex-wrap: wrap;">
-                    <a href="/rejected" x-show="rejectedCount > 0" class="btn btn--primary"
-                    style="width: auto; text-decoration: none;">
-                        <span x-text="'Review ' + rejectedCount + ' rejected'"></span>
-                    </a>
-                    <a href="/suggested" x-show="suggestedCount > 0" class="btn btn--primary"
-                    style="width: auto; text-decoration: none;">
-                        <span x-text="'Review ' + suggestedCount + ' suggested'"></span>
-                    </a>
-                    <a href="/confirm" x-show="rejectedCount === 0 && suggestedCount === 0"
-                    class="btn btn--primary" style="width: auto; text-decoration: none;">
-                        <span>Continue to confirm</span>
-                    </a>
-                </div>
-            </div>
-        </template>
     </main>
 
     <div class="resizer resizer--right"
@@ -185,11 +255,11 @@
                 </header>
 
                 <div class="detail__preview">
-                    <img class="detail__img"
-                        :src="currentWinner.url"
-                        @click="openLightbox(currentWinner.id)"
-                        style="cursor: zoom-in;"
-                        alt="">
+                    <button type="button" class="detail__preview-button"
+                            @click="openLightbox(currentWinner.id)"
+                            aria-label="View the chosen photo full size">
+                        <img class="detail__img" :src="currentWinner.url" alt="">
+                    </button>
                 </div>
 
                 <dl class="detail__meta">
@@ -214,11 +284,24 @@
                         @click="confirmGroup()"
                         :disabled="selectedGroup.status === 'completed'"
                     >
-                        <span x-text="selectedGroup.status === 'completed' ? 'Confirmed' : 'Confirm as best'"></span>
+                        <span class="btn__label">
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="m4 10.5 4 4 8-9"></path>
+                            </svg>
+                            <span x-text="selectedGroup.status === 'completed' ? 'Confirmed' : 'Confirm as best'"></span>
+                        </span>
                         <kbd x-show="selectedGroup.status !== 'completed'">⏎</kbd>
                     </button>
                     <button type="button" class="btn btn--danger" @click="deleteGroup()">
-                        <span>Delete group</span>
+                        <span class="btn__label">
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M4.5 6h11"></path>
+                                <path d="m6 6 .7 10h6.6L14 6"></path>
+                                <path d="M8 6V4h4v2"></path>
+                                <path d="M8.5 8.5v5M11.5 8.5v5"></path>
+                            </svg>
+                            Remove group
+                        </span>
                         <kbd>⌫</kbd>
                     </button>
                 </footer>
@@ -227,15 +310,16 @@
     </aside>
 
     <!-- TOASTS -->
-    <div class="toasts" x-ref="toasts" aria-live="polite"></div>
+    <div class="toasts" x-ref="toasts" aria-live="polite" aria-atomic="true"></div>
 
     <!-- SHORTCUTS OVERLAY -->
     <template x-if="showShortcuts">
-        <div class="overlay" @click.self="showShortcuts = false">
-            <div class="overlay__panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+        <div class="overlay" @click.self="closeShortcuts()" @keydown.escape.stop.prevent="closeShortcuts()">
+            <div class="overlay__panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title"
+                 @keydown.tab="trapDialogFocus($event)">
                 <header class="overlay__header">
                     <div class="overlay__title" id="shortcuts-title">Keyboard shortcuts</div>
-                    <button type="button" class="overlay__close" @click="showShortcuts = false" aria-label="Close">Esc</button>
+                    <button type="button" class="overlay__close" x-ref="shortcutsClose" @click="closeShortcuts()" aria-label="Close">Esc</button>
                 </header>
                 <div class="shortcuts">
                     <div class="shortcuts__group">
@@ -250,6 +334,12 @@
                         <div class="shortcut"><span>Delete group</span><kbd>⌫</kbd></div>
                     </div>
                     <div class="shortcuts__group">
+                        <div class="shortcuts__group-title">Compare photos</div>
+                        <div class="shortcut"><span>Previous / next photo</span><kbd>←</kbd><kbd>→</kbd></div>
+                        <div class="shortcut"><span>Select previewed photo</span><kbd>Enter</kbd></div>
+                        <div class="shortcut"><span>Zoom / close preview</span><kbd>Z</kbd><kbd>Esc</kbd></div>
+                    </div>
+                    <div class="shortcuts__group">
                         <div class="shortcuts__group-title">Other</div>
                         <div class="shortcut"><span>Undo last action</span><kbd>⌘</kbd><kbd>Z</kbd></div>
                         <div class="shortcut"><span>This overlay</span><kbd>?</kbd></div>
@@ -262,28 +352,72 @@
 
     <!-- LIGHTBOX -->
     <div x-data="lightbox()"
-        @open-lightbox.window="show($event.detail.photos, $event.detail.index)"
+        @open-lightbox.window="show($event.detail.photos, $event.detail.index); onSelect = $event.detail.onSelect"
         x-show="open"
         x-transition.opacity.duration.150ms
         class="lightbox"
-        @keydown.escape.window="close()"
-        @keydown.arrow-right.window="next()"
-        @keydown.arrow-left.window="prev()"
-        @keydown.z.window="zoom = !zoom"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lightbox-photo-name"
+        aria-describedby="lightbox-help"
+        tabindex="-1"
+        x-ref="dialog"
+        @keydown.tab="trapFocus($event)"
+        @keydown.enter="if (!$event.target.closest('button') && current?.id !== currentWinner?.id) { $event.preventDefault(); selectCurrent().then(selected => { if (selected) close(false); }); }"
+        @keydown.escape.window="if (open) { $event.stopPropagation(); close(); }"
+        @keydown.arrow-right.window="if (open) { $event.preventDefault(); next(); }"
+        @keydown.arrow-left.window="if (open) { $event.preventDefault(); prev(); }"
+        @keydown.z.window="if (open) zoom = !zoom"
         style="display: none;">
         <div class="lightbox__stage" @click="toggleZoom($event)">
             <img :src="current?.url"
                 :style="`transform: ${transform}`"
                 class="lightbox__img"
                 :class="zoom && 'lightbox__img--zoomed'"
-                alt="">
+                :alt="current?.label || ''">
         </div>
         <div class="lightbox__chrome">
-            <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
-            <span class="lightbox__hint">
-                <kbd>Z</kbd> zoom · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>Esc</kbd> close
+            <div class="lightbox__identity" aria-live="polite" aria-atomic="true">
+                <span class="lightbox__photo-name" id="lightbox-photo-name"
+                      x-text="current?.label"></span>
+                <span class="lightbox__counter" x-text="(index + 1) + ' of ' + photos.length"></span>
+            </div>
+            <span class="lightbox__hint" id="lightbox-help">
+                <kbd>←</kbd><kbd>→</kbd> Navigate · <kbd>Enter</kbd> Select · <kbd>Z</kbd> Zoom
             </span>
-            <button type="button" class="lightbox__close" @click="close()">Close</button>
+            <div class="lightbox__actions">
+                <button type="button" class="lightbox__nav"
+                        @click="prev()" :disabled="index === 0"
+                        aria-label="Previous photo">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="m12.5 4.5-6 5.5 6 5.5"></path>
+                    </svg>
+                </button>
+                <button type="button" class="lightbox__nav"
+                        @click="next()" :disabled="index === photos.length - 1"
+                        aria-label="Next photo">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="m7.5 4.5 6 5.5-6 5.5"></path>
+                    </svg>
+                </button>
+                <template x-if="current?.id === currentWinner?.id">
+                    <span class="lightbox__selected-label" role="status">
+                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                            <path d="m3.5 8.2 2.8 2.8 6.2-6.2"></path>
+                        </svg>
+                        Selected
+                    </span>
+                </template>
+                <template x-if="current?.id !== currentWinner?.id">
+                    <button type="button" class="lightbox__select"
+                            @click="selectCurrent().then(selected => { if (selected) close(false); })"
+                            :aria-label="'Choose ' + current?.label">
+                        Choose photo
+                    </button>
+                </template>
+                <button type="button" class="lightbox__close" x-ref="closeButton"
+                        @click="close()">Close</button>
+            </div>
         </div>
     </div>
 
@@ -295,31 +429,69 @@
         </div>
     </template>
 
-    {% if use_fixtures %}
-    <div class="badge-fixtures">Fixtures · sample data</div>
-    {% endif %}
+    <!-- ALL GROUPS REVIEWED -->
+    <template x-if="showCompletionDialog">
+        <div class="overlay completion-overlay"
+             @click.self="closeCompletionDialog()"
+             @keydown.escape.stop.prevent="closeCompletionDialog()">
+            <section class="completion-panel" role="dialog" aria-modal="true"
+                     aria-labelledby="completion-title" aria-describedby="completion-description"
+                     @keydown.tab="trapDialogFocus($event)">
+                <button type="button" class="completion-close" x-ref="completionClose" @click="closeCompletionDialog()"
+                        aria-label="Close and keep editing">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="m5 5 10 10M15 5 5 15"></path>
+                    </svg>
+                </button>
+                <div class="completion-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                        <path d="m5 12.5 4.5 4.5L19 7"></path>
+                    </svg>
+                </div>
+                <p class="completion-kicker">Review complete</p>
+                <h2 class="completion-title" id="completion-title">Every photo group reviewed</h2>
+                <p class="completion-description" id="completion-description">
+                    Your choices are ready. Your original files stay in place while you review the next step.
+                </p>
 
-    <div x-data="lightbox()"
-        x-show="open"
-        x-transition.opacity.duration.150ms
-        class="lightbox"
-        @keydown.escape.window="close()"
-        @keydown.arrow-right.window="next()"
-        @keydown.arrow-left.window="prev()"
-        @keydown.z.window="zoom = !zoom">
-        <div class="lightbox__backdrop" @click="close()"></div>
-        <div class="lightbox__stage" @click="toggleZoom($event)">
-            <img :src="current?.url"
-                :style="`transform: ${transform}`"
-                class="lightbox__img"
-                alt="">
+                <dl class="completion-stats" aria-label="Review summary">
+                    <div>
+                        <dt>Groups reviewed</dt>
+                        <dd x-text="completedCount"></dd>
+                    </div>
+                    <div>
+                        <dt>Kept</dt>
+                        <dd x-text="groups.filter(group => group.status === 'completed').length"></dd>
+                    </div>
+                    <div>
+                        <dt>Skipped</dt>
+                        <dd x-text="groups.filter(group => group.status === 'deleted').length"></dd>
+                    </div>
+                </dl>
+
+                <div class="completion-next">
+                    <span class="completion-next__label">Up next</span>
+                    <strong x-text="completionNextStep.title"></strong>
+                    <span x-text="completionNextStep.detail"></span>
+                </div>
+
+                <footer class="completion-actions">
+                    <a class="btn btn--primary" :href="completionNextStep.href" x-ref="completionContinue">
+                        <span class="btn__label">
+                            <span>Continue to review</span>
+                            <svg class="button-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M3.5 10h12"></path>
+                                <path d="m10.5 4.5 5.5 5.5-5.5 5.5"></path>
+                            </svg>
+                        </span>
+                    </a>
+                    <button type="button" class="btn btn--ghost" @click="closeCompletionDialog()">
+                        Keep editing
+                    </button>
+                </footer>
+            </section>
         </div>
-        <div class="lightbox__chrome">
-            <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
-            <span class="lightbox__hint">
-                <kbd>Z</kbd> zoom · <kbd>←</kbd><kbd>→</kbd> navigate · <kbd>Esc</kbd> close
-            </span>
-        </div>
-    </div>
+    </template>
+
 </div>
 {% endblock %}
