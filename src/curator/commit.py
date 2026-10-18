@@ -14,9 +14,13 @@ Invariants:
 """
 from __future__ import annotations
 
+import shutil
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from .scan import sha256_file as _sha256_file
 
 HEIC_EXTENSIONS = {".heic", ".heif", ".HEIC", ".HEIF"}
 COMPANION_EXTS = (".MOV", ".mov")
@@ -239,3 +243,180 @@ def plan_to_dict(plan: CommitPlan, sample_limit: int = 20) -> dict:
             for m in plan.moves[:sample_limit]
         ],
     }
+
+
+def execute_commit(plan: CommitPlan, conn, progress=None) -> dict:
+    """Move every file in `plan`. All-or-nothing.
+
+    Steps per move:
+      1. verify source exists, destination doesn't
+      2. hash source, compare to sha256_expected (when present)
+      3. mkdir parent, shutil.move
+      4. hash destination, compare to hash source
+      5. append to manifest rows (buffered, not written yet)
+
+    If any step fails: roll back every completed move (reverse order),
+    delete no manifest rows (none were written), raise the original error.
+
+    On success: write all manifest rows + update photos.committed_at,
+    in a single SQLite transaction.
+
+    Returns: {commit_id, moved, manifest_rows, stats}
+    """
+    commit_id = uuid.uuid4().hex[:12]
+    now = datetime.now().isoformat(timespec="seconds")
+
+    completed: list[Move] = []
+    manifest_rows: list[tuple] = []
+    total = len(plan.moves)
+
+    try:
+        for i, move in enumerate(plan.moves):
+            if not move.src_path.exists():
+                raise RuntimeError(f"source missing: {move.src_path}")
+            if move.dst_path.exists():
+                raise RuntimeError(f"destination exists: {move.dst_path}")
+
+            sha_before = _sha256_file(move.src_path)
+            if move.sha256_expected and sha_before != move.sha256_expected:
+                raise RuntimeError(
+                    f"hash mismatch before move: {move.src_path}\n"
+                    f"  expected: {move.sha256_expected}\n"
+                    f"  actual:   {sha_before}"
+                )
+
+            move.dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(move.src_path), str(move.dst_path))
+            completed.append(move)
+
+            sha_after = _sha256_file(move.dst_path)
+            if sha_after != sha_before:
+                raise RuntimeError(
+                    f"hash mismatch after move: {move.dst_path}\n"
+                    f"  before: {sha_before}\n"
+                    f"  after:  {sha_after}"
+                )
+
+            try:
+                size = move.dst_path.stat().st_size
+            except OSError:
+                size = None
+
+            manifest_rows.append((
+                commit_id, move.photo_id, move.companion_of,
+                str(move.src_path), str(move.dst_path),
+                sha_before, sha_after, move.role, size, now,
+            ))
+
+            if progress:
+                progress(i + 1, total)
+
+        # All moves succeeded: write manifest + committed_at atomically
+        try:
+            conn.execute("BEGIN")
+            conn.executemany(
+                "INSERT INTO manifest (commit_id, photo_id, companion_of, "
+                "original_path, new_path, sha256_before, sha256_after, role, size, moved_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                manifest_rows,
+            )
+            photo_ids = [m.photo_id for m in plan.moves if m.photo_id is not None]
+            if photo_ids:
+                conn.executemany(
+                    "UPDATE photos SET committed_at = ? WHERE id = ?",
+                    [(now, pid) for pid in photo_ids],
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    except Exception:
+        # Roll back filesystem in reverse order
+        for move in reversed(completed):
+            try:
+                if move.dst_path.exists() and not move.src_path.exists():
+                    move.src_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(move.dst_path), str(move.src_path))
+            except Exception:
+                pass  # best-effort; the error we're propagating is more important
+        raise
+
+    return {
+        "commit_id": commit_id,
+        "moved": len(completed),
+        "manifest_rows": len(manifest_rows),
+        "stats": plan.stats,
+    }
+
+
+def undo_commit(conn, commit_id: str) -> dict:
+    """Restore every file of `commit_id` back to its original path.
+
+    Reads the manifest, moves files back (reverse order), verifies each
+    SHA-256 against sha256_before, clears photos.committed_at, stamps
+    undone_at. Rows that cannot be restored (missing file, hash mismatch,
+    or original path occupied) are reported in `missing`, but the rest
+    is undone — no silent corruption.
+    """
+    rows = conn.execute(
+        "SELECT * FROM manifest WHERE commit_id = ? AND undone_at IS NULL "
+        "ORDER BY id DESC",
+        (commit_id,),
+    ).fetchall()
+    if not rows:
+        return {"commit_id": commit_id, "restored": 0, "missing": [],
+                "note": "already undone or not found"}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    restored = 0
+    missing: list[str] = []
+
+    for row in rows:
+        new_path = Path(row["new_path"])
+        orig_path = Path(row["original_path"])
+
+        if not new_path.exists():
+            missing.append(f"{new_path} (not found)")
+            continue
+        if orig_path.exists():
+            missing.append(f"{orig_path} (original path occupied)")
+            continue
+
+        try:
+            orig_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(new_path), str(orig_path))
+        except OSError as exc:
+            missing.append(f"{new_path}: {exc}")
+            continue
+
+        sha = _sha256_file(orig_path)
+        if sha != row["sha256_before"]:
+            # Put it back where it was so state is consistent
+            try:
+                shutil.move(str(orig_path), str(new_path))
+            except OSError:
+                pass
+            missing.append(f"{new_path} (hash mismatch)")
+            continue
+
+        restored += 1
+
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE manifest SET undone_at = ? WHERE commit_id = ? AND undone_at IS NULL",
+            (now, commit_id),
+        )
+        photo_ids = [r["photo_id"] for r in rows if r["photo_id"] is not None]
+        if photo_ids:
+            conn.executemany(
+                "UPDATE photos SET committed_at = NULL WHERE id = ?",
+                [(pid,) for pid in photo_ids],
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {"commit_id": commit_id, "restored": restored, "missing": missing}

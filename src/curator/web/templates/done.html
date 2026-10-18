@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block body %}
+<script id="initial-data" type="application/json">
+{
+    "commit_id": {{ commit_id | tojson }},
+    "stats": {{ stats | tojson }}
+}
+</script>
+
+<div x-data="doneApp()" class="centered-page">
+    <div class="centered-card centered-card--wide">
+        <div class="done-hero">
+            <div class="done-hero__check" aria-hidden="true">✓</div>
+            <h1 class="done-hero__title">All organized</h1>
+            <p class="done-hero__subtitle">
+                Your photos are in their new home. Originals are never deleted.
+            </p>
+        </div>
+
+        <dl class="impact__grid impact__grid--2">
+            <div>
+                <dt>Kept</dt>
+                <dd x-text="stats.winner?.count || 0"></dd>
+                <div class="impact__sub" x-text="formatSize(stats.winner?.bytes || 0)"></div>
+            </div>
+            <div>
+                <dt>Rejected</dt>
+                <dd x-text="stats.rejected?.count || 0"></dd>
+                <div class="impact__sub" x-text="formatSize(stats.rejected?.bytes || 0)"></div>
+            </div>
+        </dl>
+
+        <div class="done-actions">
+            <button type="button" class="btn btn--primary" @click="openFolder()">
+                <span>Open folder</span>
+            </button>
+            <button type="button" class="btn btn--danger" @click="undoEverything()" :disabled="undoing">
+                <span x-text="undoing ? 'Restoring…' : 'Undo everything'"></span>
+            </button>
+        </div>
+
+        <p class="done-footer">
+            Manifest saved as commit <span class="done-footer__mono" x-text="commit_id"></span>.
+            Undo remains available until you delete the manifest.
+        </p>
+    </div>
+
+    <div class="toasts" x-ref="toasts" aria-live="polite"></div>
+</div>
+{% endblock %}

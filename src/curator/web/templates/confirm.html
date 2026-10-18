@@ -111,12 +111,16 @@
             </div>
             <footer class="detail__footer">
                 <button type="button"
-                        class="btn btn--primary"
-                        @click="execute()"
-                        :disabled="loading || data.errors?.length > 0 || !data.stats?.total_moves || executing">
-                    <span x-text="executing ? 'Coming in step 5b…' : 'Confirm & organize'"></span>
-                    <kbd>⏎</kbd>
-                </button>
+                    class="btn btn--primary"
+                    @click="execute()"
+                    :disabled="loading || data.errors?.length > 0 || !data.stats?.total_moves || executing">
+                <span x-text="executing
+                    ? (commitProgress
+                        ? commitProgress.count + ' / ' + commitProgress.total + ' files…'
+                        : 'Starting…')
+                    : 'Confirm & organize'"></span>
+                <kbd x-show="!executing">⏎</kbd>
+            </button>
                 <a href="/" class="btn btn--danger" style="text-decoration: none; text-align: center; justify-content: center;">
                     Back to review
                 </a>

@@ -682,6 +682,135 @@ def api_commit_preview():
     return jsonify(commitmod.plan_to_dict(plan))
 
 
+# ---- Commit execution ---------------------------------------------------------------
+
+def _commit_state() -> dict:
+    return current_app.config["_commit_state"]
+
+
+@bp.route("/api/commit/execute", methods=["POST"])
+def api_commit_execute():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True, "mode": "fixtures"})
+
+    state = _commit_state()
+    if state["running"]:
+        return jsonify({"error": "already running"}), 409
+
+    source_root_str = _load_setting(current_app.config["DB_PATH"], "last_folder")
+    if not source_root_str:
+        return jsonify({"error": "no source folder. Run intake first."}), 400
+    source_root = Path(source_root_str)
+    if not source_root.is_dir():
+        return jsonify({"error": f"source folder not found: {source_root}"}), 400
+
+    db_path = current_app.config["DB_PATH"]
+    threading.Thread(
+        target=_run_commit, args=(db_path, source_root, state), daemon=True
+    ).start()
+    return jsonify({"ok": True})
+
+
+def _run_commit(db_path: str, source_root: Path, state: dict) -> None:
+    from curator import commit as commitmod
+    state.clear()
+    state.update({
+        "running": True, "progress": None, "result": None, "error": None,
+        "started_at": time.time(), "finished_at": None,
+    })
+    conn = None
+    try:
+        conn = dbmod.connect(db_path)
+        plan = commitmod.plan_commit(conn, source_root)
+        if plan.has_errors:
+            state["error"] = "Cannot commit: " + "; ".join(plan.errors)
+            return
+        if not plan.moves:
+            state["error"] = "Nothing to commit."
+            return
+
+        est = ProgressEstimator(total=len(plan.moves))
+
+        def on_progress(done: int, total: int) -> None:
+            snap = est.update(done)
+            state["progress"] = {
+                "count": done, "total": total,
+                "eta_label": snap["eta_label"],
+            }
+
+        result = commitmod.execute_commit(plan, conn, progress=on_progress)
+        _save_setting(db_path, "last_commit_id", result["commit_id"])
+        state["result"] = result
+    except Exception as exc:
+        state["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
+        state["running"] = False
+        state["finished_at"] = time.time()
+
+
+@bp.route("/api/commit/status")
+def api_commit_status():
+    return jsonify(_commit_state())
+
+
+@bp.route("/api/commit/undo", methods=["POST"])
+def api_commit_undo():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True, "restored": 0, "missing": []})
+    from curator import commit as commitmod
+    commit_id = _load_setting(current_app.config["DB_PATH"], "last_commit_id")
+    if not commit_id:
+        return jsonify({"error": "no commit to undo"}), 400
+    try:
+        result = commitmod.undo_commit(get_db(), commit_id)
+    except Exception as exc:
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+    return jsonify(result)
+
+
+# ---- Done page ----------------------------------------------------------------------
+
+@bp.route("/done")
+def done():
+    if current_app.config["USE_FIXTURES"]:
+        return redirect(url_for("web.index"))
+    conn = get_db()
+    commit_id = _load_setting(current_app.config["DB_PATH"], "last_commit_id")
+    if not commit_id:
+        return redirect(url_for("web.intake"))
+
+    rows = conn.execute(
+        "SELECT role, COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes "
+        "FROM manifest WHERE commit_id = ? AND undone_at IS NULL "
+        "GROUP BY role",
+        (commit_id,),
+    ).fetchall()
+    if not rows:
+        # Everything was undone; nothing to show
+        return redirect(url_for("web.intake"))
+
+    stats = {r["role"]: {"count": r["count"], "bytes": r["bytes"]} for r in rows}
+    return render_template("done.html", commit_id=commit_id, stats=stats)
+
+
+@bp.route("/api/open-folder", methods=["POST"])
+def api_open_folder():
+    if sys.platform != "darwin":
+        return jsonify({"error": "native open only on macOS"}), 400
+    source = _load_setting(current_app.config["DB_PATH"], "last_folder")
+    if not source:
+        return jsonify({"error": "no source folder"}), 400
+    target = Path(source) / "_curator" / "winner"
+    if not target.exists():
+        target = Path(source) / "_curator"
+    if not target.exists():
+        return jsonify({"error": "output folder not found"}), 404
+    subprocess.run(["open", str(target)], check=False)
+    return jsonify({"ok": True})
+
+
 # ---- Photos -------------------------------------------------------------------------
 
 @bp.route("/photos/<int:photo_id>/thumb")

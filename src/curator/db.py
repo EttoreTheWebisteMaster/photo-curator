@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS manifest (
     sha256_before   TEXT,
     sha256_after    TEXT,
     role            TEXT NOT NULL,
+    size            INTEGER,
     moved_at        TEXT NOT NULL,
     undone_at       TEXT
 );
@@ -124,6 +125,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         added = True
     if "committed_at" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN committed_at TEXT")
+        added = True
+    manifest_cols = {r["name"] for r in conn.execute("PRAGMA table_info(manifest)")}
+    if manifest_cols and "size" not in manifest_cols:
+        conn.execute("ALTER TABLE manifest ADD COLUMN size INTEGER")
         added = True
     if added:
         conn.commit()

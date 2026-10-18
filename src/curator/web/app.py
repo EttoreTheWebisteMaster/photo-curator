@@ -33,6 +33,14 @@ def create_app(db_path: str | Path = "curator.db", use_fixtures: bool = False) -
     # this dict, so they never touch `current_app`.
     app.config["_analysis_state"] = _initial_analysis_state()
     app.config["_analysis_stop"] = threading.Event()
+    app.config["_commit_state"] = {
+        "running": False,
+        "progress": None,
+        "result": None,
+        "error": None,
+        "started_at": None,
+        "finished_at": None,
+    }
 
     from .views import bp, close_db
     app.register_blueprint(bp)

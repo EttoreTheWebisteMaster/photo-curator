@@ -650,6 +650,7 @@ function confirmApp() {
         data: { stats: null, errors: [], sample: [] },
         loading: true,
         executing: false,
+        commitProgress: null,
 
         async load() {
             this.loading = true;
@@ -668,11 +669,51 @@ function confirmApp() {
             }
         },
 
-        execute() {
+                execute() {
             if (this.executing || this.loading) return;
-            this.toast('Execution arrives in step 5b', null, null);
+            if (!this.data.stats || !this.data.stats.total_moves) return;
+            this.executing = true;
+            this.commitProgress = null;
+            fetch('/api/commit/execute', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        this.executing = false;
+                        this.toast(data.error, null, null);
+                        return;
+                    }
+                    this.pollCommit();
+                })
+                .catch(() => {
+                    this.executing = false;
+                    this.toast('Could not start commit', null, null);
+                });
         },
 
+        pollCommit() {
+            const tick = async () => {
+                try {
+                    const r = await fetch('/api/commit/status');
+                    const data = await r.json();
+                    this.commitProgress = data.progress;
+                    if (!data.running) {
+                        if (data.error) {
+                            this.executing = false;
+                            this.toast(data.error, null, null);
+                        } else if (data.result) {
+                            window.location = '/done';
+                        } else {
+                            this.executing = false;
+                        }
+                    } else {
+                        setTimeout(tick, 300);
+                    }
+                } catch {
+                    setTimeout(tick, 500);
+                }
+            };
+            tick();
+        },
         basename(p) { return String(p || '').split('/').pop(); },
 
         formatSize(bytes) {
@@ -698,6 +739,90 @@ function confirmApp() {
             }
             this.$refs.toasts.appendChild(el);
             el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 1800);
+        },
+        dismissToast(el) {
+            if (!el || !el.parentNode) return;
+            clearTimeout(el._timeout);
+            el.classList.add('toast--out');
+            setTimeout(() => el.remove(), 200);
+        },
+    };
+}
+
+function doneApp() {
+    return {
+        commit_id: null,
+        stats: {},
+        undoing: false,
+
+        init() {
+            const data = JSON.parse(document.getElementById('initial-data').textContent);
+            this.commit_id = data.commit_id;
+            this.stats = data.stats || {};
+        },
+
+        async openFolder() {
+            try {
+                const r = await fetch('/api/open-folder', { method: 'POST' });
+                const data = await r.json();
+                if (data.error) this.toast(data.error, null, null);
+            } catch {
+                this.toast('Could not open folder', null, null);
+            }
+        },
+
+        async undoEverything() {
+            if (this.undoing) return;
+            this.undoing = true;
+            try {
+                const r = await fetch('/api/commit/undo', { method: 'POST' });
+                const data = await r.json();
+                if (data.error) {
+                    this.toast(data.error, null, null);
+                    this.undoing = false;
+                    return;
+                }
+                const restored = data.restored || 0;
+                const missing = (data.missing || []).length;
+                if (missing > 0) {
+                    this.toast(
+                        `Restored ${restored} files · ${missing} could not be restored`,
+                        null, null
+                    );
+                    setTimeout(() => { window.location = '/'; }, 2500);
+                } else {
+                    this.toast(`Restored ${restored} files`, null, null);
+                    setTimeout(() => { window.location = '/'; }, 1200);
+                }
+            } catch {
+                this.toast('Could not undo', null, null);
+                this.undoing = false;
+            }
+        },
+
+        formatSize(bytes) {
+            if (!bytes) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let i = 0, v = bytes;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return v.toFixed(v < 10 ? 1 : 0) + ' ' + units[i];
+        },
+
+        toast(text, actionLabel, onAction) {
+            this.$refs.toasts.querySelectorAll('.toast').forEach(t => this.dismissToast(t));
+            const el = document.createElement('div');
+            el.className = 'toast';
+            const txt = document.createElement('span');
+            txt.className = 'toast__text'; txt.textContent = text;
+            el.appendChild(txt);
+            if (actionLabel) {
+                const btn = document.createElement('button');
+                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
+                btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
+                el.appendChild(btn);
+            }
+            this.$refs.toasts.appendChild(el);
+            el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 2200);
         },
         dismissToast(el) {
             if (!el || !el.parentNode) return;

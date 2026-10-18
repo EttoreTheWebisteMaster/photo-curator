@@ -784,3 +784,220 @@ def test_preview_endpoint_no_disk_writes(tmp_path):
     assert body["stats"]["total_moves"] >= 1
     assert os.stat(root / "a.jpg").st_mtime == mtime_before
     assert not (root / "_curator").exists()
+
+
+# ---- Step 5b: commit execution + undo -----------------------------------------------
+
+def _setup_commit_ready(tmp_path):
+    from curator import db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    conn.execute(
+        "UPDATE group_states SET status='completed', current_winner_photo_id=("
+        "SELECT MIN(photo_id) FROM groups WHERE group_id=group_states.group_id)"
+    )
+    conn.commit()
+    return root, conn
+
+
+def test_execute_commit_moves_files(tmp_path):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    assert len(plan.moves) == 2
+
+    result = commit.execute_commit(plan, conn)
+    assert result["moved"] == 2
+    assert result["manifest_rows"] == 2
+
+    for m in plan.moves:
+        assert not m.src_path.exists()
+        assert m.dst_path.exists()
+
+    rows = conn.execute("SELECT * FROM manifest").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["sha256_before"] == r["sha256_after"]
+        assert r["undone_at"] is None
+        assert r["size"] > 0
+
+
+def test_execute_commit_updates_committed_at(tmp_path):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    commit.execute_commit(plan, conn)
+    n_committed = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE committed_at IS NOT NULL"
+    ).fetchone()[0]
+    assert n_committed == len(plan.moves)
+
+
+def test_execute_commit_hash_mismatch_rolls_back(tmp_path, monkeypatch):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    assert len(plan.moves) == 2
+
+    # Corrupt the source after planning so the first hash verification fails
+    target = plan.moves[0].src_path
+    original_bytes = target.read_bytes()
+    target.write_bytes(b"corrupted")
+
+    import pytest
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        commit.execute_commit(plan, conn)
+
+    # Nothing moved, no manifest
+    assert target.exists()
+    assert target.read_bytes() == b"corrupted"
+    assert conn.execute("SELECT COUNT(*) FROM manifest").fetchone()[0] == 0
+    for m in plan.moves:
+        assert m.src_path.exists() or m.src_path == target
+
+
+def test_execute_commit_mid_failure_rolls_back(tmp_path, monkeypatch):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    assert len(plan.moves) == 2
+
+    original_move = commit.shutil.move
+    calls = {"n": 0}
+    def failing_move(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("simulated failure")
+        return original_move(src, dst)
+    monkeypatch.setattr(commit.shutil, "move", failing_move)
+
+    import pytest
+    with pytest.raises(OSError, match="simulated"):
+        commit.execute_commit(plan, conn)
+
+    # First file rolled back, nothing in manifest
+    for m in plan.moves:
+        assert m.src_path.exists()
+        assert not m.dst_path.exists()
+    assert conn.execute("SELECT COUNT(*) FROM manifest").fetchone()[0] == 0
+
+
+def test_execute_commit_live_photo_pair(tmp_path):
+    from curator import commit, db, group, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (100, 100), (200, 100, 50)).save(root / "IMG_0001.HEIC", format="HEIF")
+    (root / "IMG_0001.MOV").write_bytes(b"fake mov data")
+
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    aid = conn.execute("SELECT id FROM photos").fetchone()[0]
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=?", (aid,))
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    assert len(plan.moves) == 2
+
+    result = commit.execute_commit(plan, conn)
+    assert result["moved"] == 2
+    assert result["stats"]["companion"] == 1
+
+    rows = conn.execute(
+        "SELECT * FROM manifest ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    still = next(r for r in rows if r["photo_id"] is not None)
+    mov = next(r for r in rows if r["companion_of"] is not None)
+    assert still["new_path"].endswith(".HEIC")
+    assert mov["new_path"].endswith(".MOV")
+    assert Path(still["new_path"]).stem == Path(mov["new_path"]).stem
+    assert mov["companion_of"] == still["photo_id"]
+
+
+def test_undo_commit_restores(tmp_path):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    src_paths = [m.src_path for m in plan.moves]
+    dst_paths = [m.dst_path for m in plan.moves]
+
+    result = commit.execute_commit(plan, conn)
+    commit_id = result["commit_id"]
+
+    undo_result = commit.undo_commit(conn, commit_id)
+    assert undo_result["restored"] == 2
+    assert undo_result["missing"] == []
+
+    for src in src_paths:
+        assert src.exists()
+    for dst in dst_paths:
+        assert not dst.exists()
+
+    n_committed = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE committed_at IS NOT NULL"
+    ).fetchone()[0]
+    assert n_committed == 0
+
+    n_undone = conn.execute(
+        "SELECT COUNT(*) FROM manifest WHERE undone_at IS NOT NULL"
+    ).fetchone()[0]
+    assert n_undone == 2
+
+
+def test_undo_commit_idempotent(tmp_path):
+    from curator import commit
+    root, conn = _setup_commit_ready(tmp_path)
+    plan = commit.plan_commit(conn, root)
+    result = commit.execute_commit(plan, conn)
+
+    commit.undo_commit(conn, result["commit_id"])
+    undo2 = commit.undo_commit(conn, result["commit_id"])
+    assert undo2["restored"] == 0
+    assert undo2["note"] == "already undone or not found"
+
+
+def test_commit_endpoint_async(tmp_path):
+    import time
+    from curator import db as dbmod
+    from curator.web.app import create_app
+    root, conn = _setup_commit_ready(tmp_path)
+    conn.close()
+
+    conn2 = dbmod.connect(tmp_path / "t.db")
+    conn2.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_folder', ?)",
+        (str(root),),
+    )
+    conn2.commit()
+    conn2.close()
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+
+    r = client.post("/api/commit/execute")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+
+    status = None
+    for _ in range(100):
+        status = client.get("/api/commit/status").get_json()
+        if not status["running"]:
+            break
+        time.sleep(0.1)
+
+    assert status is not None
+    assert not status["running"]
+    assert status["error"] is None
+    assert status["result"] is not None
+    assert status["result"]["moved"] >= 1
+
+    # Verify done page reachable
+    r = client.get("/done")
+    assert r.status_code == 200
