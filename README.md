@@ -1,70 +1,62 @@
-# photo-curator
+## Step 2: embeddings and near-duplicate grouping
 
-Local photo cataloguer. **Step 1: indexing and provisional grouping.**
-It never modifies, moves or deletes any file: it only reads. No network access.
+pHash alone is a weak grouper: it catches exact copies and bursts well, but misses the same
+scene with small changes. Step 2 adds visual embeddings (DINOv2, optionally CLIP) and a
+benchmark harness that tells you which method works best **on your own photos**.
 
-## Install (macOS)
-
-```bash
-cd photo-curator
-python3 -m venv .venv && source .venv/bin/activate
-python -m pip install --upgrade pip   # needed if pip is old ("editable mode" error)
-pip install -e ".[dev]"
-pytest            # uses synthetic photos only
-```
-
-## Usage
+### Install the optional deps
 
 ```bash
-# 1. Index a folder (incremental: unchanged files are skipped)
-curator scan ~/Pictures/sample          # add --force to re-scan everything
-
-# 2. Group by time session + visual similarity (provisional)
-curator group                           # --session-gap 30 --max-hamming 10
-
-# 3. Summary
-curator stats --errors
+pip install -e ".[dev,embeddings]"    # pulls torch + transformers
 ```
 
-The database is `curator.db` (SQLite) in the current folder. It holds metadata only.
-Inspect it read-only with: `sqlite3 -readonly -header -column curator.db`
+On an M1 with 8 GB, DINOv2 ViT-S/14 is the safe default: ~85 MB on disk, MPS-accelerated,
+~1 GB peak RAM at batch size 8.
 
-## Important: the Apple Photos library
-
-If your photos live in the Photos app, **do not point the tool at a `.photoslibrary`**: it is
-refused on purpose. Export a copy first, for example:
+### Workflow
 
 ```bash
-pip install osxphotos
-osxphotos export ~/Pictures/sample --directory "{created.year}/{created.month}"
+# 1. Compute embeddings once per photo (saved to SQLite, never recomputed for unchanged files)
+curator embed --model dinov2_vits14
+
+# 2. Re-group using embeddings instead of, or in addition to, pHash
+curator group --method combined --model dinov2_vits14 --cosine-threshold 0.20
+curator groups --min-size 2                    # lists groups and their files
+
+# 3. Label the best photo in each group you care about
+curator label --group 5 --photo path/to/best.jpg --label winner
+curator label --group 5 --photo path/to/blurry.jpg --label rejected --reason "out of focus"
+
+# 4. See which scorer picks your winners most often
+curator benchmark --model dinov2_vits14
 ```
 
-For a first test use a sample of 300-500 photos, not the whole library.
+### Grouping methods
 
-## What step 1 does
+- `phash` (default, step-1 behaviour): Hamming distance on the 64-bit perceptual hash.
+  Fast, no ML. Good for exact copies and near-identical bursts.
+- `embeddings`: cosine similarity of DINOv2 (384-dim) or CLIP (512-dim) vectors.
+  Better on the same scene with small changes. `--cosine-threshold` is the cutoff on
+  `1 − similarity` (0.20 ≈ similarity 0.80; tune on your own photos).
+- `combined`: group if pHash says "near-identical" **or** embeddings say "same scene".
+  Best of both; same cost as `embeddings` only.
 
-- Capture date, in order of trust: EXIF capture date → EXIF date → date (and time) in the file
-  name (WhatsApp `IMG-20210909-WA0026`, Android `IMG_20210909_143012`, screenshots…) →
-  file modification time. Each photo records where its date came from (`taken_source`) and whether
-  its time of day is trustworthy (`time_known`).
-- Photos with no trustworthy time of day (typical for WhatsApp images, which carry no EXIF) are
-  compared with every photo of the same calendar day instead of being placed in a time session.
-- SHA-256 of the file (exact copies), perceptual hash (near-duplicates), sharpness (variance of
-  the Laplacian, whole image), orientation from EXIF, HEIC supported (`pillow-heif`).
-- Time sessions: a pause longer than 30 minutes starts a new session; inside a session, photos
-  with a similar perceptual hash are merged.
+### Reading the benchmark
 
-## Upgrading from version 0.1.0
+`curator benchmark` evaluates **scorers**, not the embedding model itself: each scorer
+returns the photo it would pick, and we check whether it matches your `winner` label.
+With 20–60 labeled groups you get a first signal:
 
-Just run `curator scan <folder>` again: the database is migrated and old rows are re-scanned
-automatically. Then run `curator group` and `curator stats`.
+- `sharpness` — variance of the Laplacian (from step 1)
+- `phash_centroid` — photo closest to the others by pHash
+- `emb_centroid` — photo closest to the group's embedding centroid
+- `random` — baseline (should be ~1/N)
 
-## Known limits (to be addressed in the next steps)
+Step 3 adds real technical signals (exposure, eyes open); step 4 adds aesthetics.
+The harness is deliberately scorer-agnostic so those plug in unchanged.
 
-- pHash is a weak grouper: fine for near-identical shots, not for the same scene with small
-  changes. Step 2 adds embeddings (DINOv2) and a benchmark that decides which method works best
-  on your own photos.
-- Sharpness is measured on the whole image; we want it on the subject/face (step 3).
-- The thresholds (30 minutes, distance 10) are starting values to be tuned on your sample.
-- For files named like `IMG-YYYYMMDD-WA####`, the time of day comes from the file's modification
-  time when that falls on the same day: it is when the file arrived, not when the photo was taken.
+### Important: re-grouping invalidates `winner` labels
+
+Group IDs are regenerated on every `curator group`. Choose the method you want first
+(guided by `curator groups` and your own eyes), **then** label, **then** benchmark.
+A future step adds stable group IDs and a review UI.

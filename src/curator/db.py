@@ -13,13 +13,12 @@ CREATE TABLE IF NOT EXISTS photos (
     sha256        TEXT,
     width         INTEGER,
     height        INTEGER,
-    taken_at      TEXT,          -- ISO 8601, local time as written in the EXIF / file name
-    taken_source  TEXT,          -- exif_original | exif_datetime | filename_datetime |
-                                 -- filename_date_mtime | filename_date | file_mtime
-    time_known    INTEGER,       -- 1 = time of day is trustworthy, 0 = only the date is usable
-    phash         TEXT,          -- perceptual hash (hex, 64 bit)
-    sharpness     REAL,          -- variance of the Laplacian over the whole image (provisional)
-    error         TEXT,          -- set when the file could not be read
+    taken_at      TEXT,
+    taken_source  TEXT,
+    time_known    INTEGER,
+    phash         TEXT,
+    sharpness     REAL,
+    error         TEXT,
     scanned_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_photos_taken_at ON photos(taken_at);
@@ -31,13 +30,51 @@ CREATE TABLE IF NOT EXISTS groups (
     run_id    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_groups_group ON groups(group_id);
+
+-- Step 2: visual embeddings, one row per (photo, model).
+-- float32 little-endian, L2-normalized -> cosine = dot product.
+CREATE TABLE IF NOT EXISTS embeddings (
+    photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (photo_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+
+-- Step 2: user labels for the benchmark and (later) the personal ranker.
+-- "winner" = best in its group, "forse" = keep but not sure, "rejected" = discard.
+CREATE TABLE IF NOT EXISTS labels (
+    id          INTEGER PRIMARY KEY,
+    group_id    INTEGER NOT NULL,
+    photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
+    reason      TEXT,
+    created_at  TEXT NOT NULL,
+    UNIQUE(group_id, photo_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_labels_group ON labels(group_id);
+CREATE INDEX IF NOT EXISTS idx_labels_photo ON labels(photo_id);
+
+-- Step 2: benchmark results, one row per (run, method).
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    id          INTEGER PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    task        TEXT NOT NULL,           -- 'scorer' (later: 'grouping')
+    method      TEXT NOT NULL,
+    groups      INTEGER NOT NULL,        -- groups evaluated
+    hits        INTEGER NOT NULL,
+    accuracy    REAL NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bench_run ON benchmark_runs(run_id);
 """
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Upgrade databases created by older versions."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(photos)")}
-    if "time_known" not in cols:  # added in 0.2.0; old rows get re-scanned automatically
+    if "time_known" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN time_known INTEGER")
         conn.commit()
 

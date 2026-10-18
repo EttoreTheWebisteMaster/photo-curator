@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter
 
-from curator import db, group, scan
+from curator import benchmark, db, embeddings, group, scan
 
 
 def make_scene(seed: int, size=(640, 480)) -> Image.Image:
@@ -35,6 +35,34 @@ def tree_hash(root: Path) -> dict:
     return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+def _fake_embedder(seed: int = 0) -> embeddings.Embedder:
+    """Deterministic 8-dim embedder for tests; avoids importing torch."""
+    class _Fake(embeddings.Embedder):
+        name = "fake"
+
+        @property
+        def dim(self) -> int:
+            return 8
+
+        def embed_batch(self, images):
+            rng = np.random.default_rng(seed)
+            v = rng.standard_normal((len(images), 8)).astype(np.float32)
+            return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+    return _Fake()
+
+
+def _insert_photo(conn, name: str, sharpness: float) -> int:
+    """Bare-bones row used by benchmark tests (no files on disk)."""
+    cur = conn.execute(
+        "INSERT INTO photos (path, size, mtime, taken_at, taken_source, time_known, "
+        "sharpness, phash, scanned_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (f"/fake/{name}.jpg", 1, 0.0, "2026-10-01T10:00:00", "file_mtime", 1,
+         sharpness, "0000000000000000", "2026-10-01T00:00:00"),
+    )
+    return cur.lastrowid
+
+
 @pytest.fixture
 def photos(tmp_path):
     root = tmp_path / "photos"
@@ -49,6 +77,8 @@ def photos(tmp_path):
     (root / "notes.txt").write_text("ignore me")
     return root
 
+
+# ---- Step 1 tests (unchanged) -------------------------------------------------------------
 
 def test_scan_is_read_only_and_reports_errors(photos, tmp_path):
     before = tree_hash(photos)
@@ -183,3 +213,117 @@ def test_unknown_time_photo_joins_known_time_photo_of_same_day(tmp_path):
     group.build_groups(conn)
     ids = {r["group_id"] for r in conn.execute("SELECT group_id FROM groups")}
     assert len(ids) == 1
+
+
+# ---- Step 2: embeddings storage, grouping method, benchmark -------------------------------
+
+def test_embedding_storage_roundtrip(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO photos (path, size, mtime, scanned_at) VALUES (?,?,?,?)",
+        ("/fake.jpg", 1, 0.0, "2026-01-01T00:00:00"),
+    )
+    conn.commit()
+    vec = np.random.default_rng(0).standard_normal(384).astype(np.float32)
+    vec /= np.linalg.norm(vec)
+    embeddings.save_embedding(conn, 1, "test", vec)
+    loaded = embeddings.load_embedding(conn, 1, "test")
+    np.testing.assert_allclose(loaded, vec, rtol=1e-6)
+
+
+def test_embedding_is_upsert(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO photos (path, size, mtime, scanned_at) VALUES (?,?,?,?)",
+        ("/fake.jpg", 1, 0.0, "2026-01-01T00:00:00"),
+    )
+    conn.commit()
+    v1 = np.ones(8, dtype=np.float32) / np.sqrt(8)
+    v2 = np.zeros(8, dtype=np.float32)
+    v2[0] = 1.0
+    embeddings.save_embedding(conn, 1, "test", v1)
+    embeddings.save_embedding(conn, 1, "test", v2)
+    np.testing.assert_allclose(embeddings.load_embedding(conn, 1, "test"), v2)
+
+
+def test_embed_folder_with_fake_embedder_is_incremental(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for i in range(3):
+        Image.new("RGB", (64, 48), color=(i * 40, 0, 0)).save(root / f"p{i}.jpg")
+
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+
+    stats = embeddings.embed_folder(conn, "fake", embedder=_fake_embedder())
+    assert stats["embedded"] == 3 and stats["candidates"] == 3 and stats["errors"] == 0
+    for pid in (1, 2, 3):
+        v = embeddings.load_embedding(conn, pid, "fake")
+        assert v is not None and v.shape == (8,)
+
+    stats = embeddings.embed_folder(conn, "fake", embedder=_fake_embedder())
+    assert stats["embedded"] == 0 and stats["candidates"] == 0
+
+
+def test_group_by_embeddings(tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for i in range(3):
+        Image.new("RGB", (64, 48), color=(200, 100, 50 + i)).save(root / f"a{i}.jpg")
+    Image.new("RGB", (64, 48), color=(50, 100, 200)).save(root / "b0.jpg")
+
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+
+    # Hand-crafted embeddings: a* cluster on e1, b0 on e3.
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    for i, name in enumerate(("a0.jpg", "a1.jpg", "a2.jpg")):
+        v = np.array([1.0, 0.01 * i, 0.0, 0.0] + [0.0] * 380, dtype=np.float32)
+        embeddings.save_embedding(conn, pids[name], "test", v / np.linalg.norm(v))
+    v = np.array([0.0, 0.0, 1.0, 0.0] + [0.0] * 380, dtype=np.float32)
+    embeddings.save_embedding(conn, pids["b0.jpg"], "test", v)
+    conn.commit()
+
+    group.build_groups(conn, method="embeddings", model="test", cosine_threshold=0.2)
+    g = {Path(r["path"]).name: r["group_id"] for r in conn.execute(
+        "SELECT p.path, g.group_id FROM groups g JOIN photos p ON p.id = g.photo_id")}
+    assert g["a0.jpg"] == g["a1.jpg"] == g["a2.jpg"]
+    assert g["b0.jpg"] != g["a0.jpg"]
+
+
+def test_combined_method_needs_model(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    with pytest.raises(ValueError):
+        group.build_groups(conn, method="combined")
+
+
+def test_scorer_benchmark_hits_labeled_winner(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    ids = [_insert_photo(conn, f"p{s}", s) for s in (100.0, 300.0, 50.0)]
+    for pid in ids:
+        conn.execute("INSERT INTO groups (photo_id, group_id, run_id) VALUES (?,?,?)",
+                     (pid, 1, "r1"))
+    conn.execute(
+        "INSERT INTO labels (group_id, photo_id, label, created_at) VALUES (?,?,?,?)",
+        (1, ids[1], "winner", "2026-10-01T00:00:00"),
+    )
+    conn.commit()
+
+    res = benchmark.run_scorer_benchmark(conn, {"sharpness": benchmark.scorer_sharpness})
+    assert res["sharpness"] == {"hits": 1, "total": 1, "accuracy": 1.0}
+
+
+def test_scorer_benchmark_counts_misses(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    ids = [_insert_photo(conn, f"p{s}", s) for s in (100.0, 300.0, 50.0)]
+    for pid in ids:
+        conn.execute("INSERT INTO groups (photo_id, group_id, run_id) VALUES (?,?,?)",
+                     (pid, 1, "r1"))
+    conn.execute(  # the *least* sharp one is the labeled winner -> sharpness must miss
+        "INSERT INTO labels (group_id, photo_id, label, created_at) VALUES (?,?,?,?)",
+        (1, ids[2], "winner", "2026-10-01T00:00:00"),
+    )
+    conn.commit()
+
+    res = benchmark.run_scorer_benchmark(conn, {"sharpness": benchmark.scorer_sharpness})
+    assert res["sharpness"] == {"hits": 0, "total": 1, "accuracy": 0.0}

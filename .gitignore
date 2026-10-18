@@ -2,3 +2,5 @@
 .env
 
 *.db
+
+/src/photo_curator.egg-info

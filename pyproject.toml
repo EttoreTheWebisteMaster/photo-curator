@@ -1,6 +1,6 @@
 [project]
 name = "photo-curator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local photo cataloguer: indexes, groups and (later) picks the best shots. Never modifies your files."
 requires-python = ">=3.9"
 dependencies = [
@@ -12,6 +12,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+embeddings = [
+    "torch>=2.2",
+    "transformers>=4.40",
+]
 
 [project.scripts]
 curator = "curator.cli:main"
