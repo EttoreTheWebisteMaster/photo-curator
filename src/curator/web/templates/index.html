@@ -149,13 +149,16 @@
                     Rejected photos are still on disk. Nothing has been moved yet.
                 </p>
                 <div style="display: flex; gap: var(--space-3); margin-top: var(--space-4);">
-                    <a href="/rejected" x-show="rejectedCount > 0" class="btn btn--primary" style="width: auto;">
+                    <a href="/rejected" x-show="rejectedCount > 0" class="btn btn--primary"
+                    style="width: auto; text-decoration: none;">
                         <span x-text="'Review ' + rejectedCount + ' rejected photo' + (rejectedCount === 1 ? '' : 's')"></span>
                         <kbd>→</kbd>
                     </a>
-                    <span x-show="rejectedCount === 0" style="color: var(--text-tertiary); font-size: 12px; align-self: center;">
-                        No rejected photos to review. Ready to commit (step 5).
-                    </span>
+                    <a href="/confirm" x-show="rejectedCount === 0" class="btn btn--primary"
+                    style="width: auto; text-decoration: none;">
+                        <span>Continue to confirm</span>
+                        <kbd>→</kbd>
+                    </a>
                 </div>
             </div>
         </template>

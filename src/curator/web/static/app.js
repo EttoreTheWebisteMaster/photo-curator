@@ -644,3 +644,66 @@ function rejectedApp() {
         },
     };
 }
+
+function confirmApp() {
+    return {
+        data: { stats: null, errors: [], sample: [] },
+        loading: true,
+        executing: false,
+
+        async load() {
+            this.loading = true;
+            try {
+                const r = await fetch('/api/commit/preview', { method: 'POST' });
+                const body = await r.json();
+                if (!r.ok) {
+                    this.data = { stats: null, errors: [body.error || 'Preview failed'], sample: [] };
+                } else {
+                    this.data = body;
+                }
+            } catch {
+                this.data = { stats: null, errors: ['Could not build plan'], sample: [] };
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        execute() {
+            if (this.executing || this.loading) return;
+            this.toast('Execution arrives in step 5b', null, null);
+        },
+
+        basename(p) { return String(p || '').split('/').pop(); },
+
+        formatSize(bytes) {
+            if (!bytes) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let i = 0, v = bytes;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return v.toFixed(v < 10 ? 1 : 0) + ' ' + units[i];
+        },
+
+        toast(text, actionLabel, onAction) {
+            this.$refs.toasts.querySelectorAll('.toast').forEach(t => this.dismissToast(t));
+            const el = document.createElement('div');
+            el.className = 'toast';
+            const txt = document.createElement('span');
+            txt.className = 'toast__text'; txt.textContent = text;
+            el.appendChild(txt);
+            if (actionLabel) {
+                const btn = document.createElement('button');
+                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
+                btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
+                el.appendChild(btn);
+            }
+            this.$refs.toasts.appendChild(el);
+            el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 1800);
+        },
+        dismissToast(el) {
+            if (!el || !el.parentNode) return;
+            clearTimeout(el._timeout);
+            el.classList.add('toast--out');
+            setTimeout(() => el.remove(), 200);
+        },
+    };
+}

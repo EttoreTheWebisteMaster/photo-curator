@@ -620,3 +620,167 @@ def test_exact_duplicates_are_grouped_together(tmp_path):
         "SELECT p.path FROM groups g JOIN photos p ON p.id = g.photo_id"
     )}
     assert in_groups == {"a.jpg", "b.jpg"}
+
+
+# ---- Step 5a: commit preview --------------------------------------------------------
+
+def test_plan_commit_basic(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(1), root / "b.jpg", "2026:10:15 14:32:05", quality=85)
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    aid = conn.execute("SELECT id FROM photos WHERE path LIKE '%a.jpg'").fetchone()[0]
+    bid = conn.execute("SELECT id FROM photos WHERE path LIKE '%b.jpg'").fetchone()[0]
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=?", (aid,))
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    assert len(plan.moves) == 2
+    moves = {m.photo_id: m for m in plan.moves if m.photo_id is not None}
+    assert moves[aid].role == "winner"
+    assert moves[bid].role == "rejected"
+    assert moves[aid].dst_path.name.startswith("20261015_143200_")
+    assert moves[bid].dst_path.name.startswith("20261015_143205_")
+    assert moves[aid].dst_path.suffix == ".jpg"
+
+
+def test_plan_commit_blocks_on_pending(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    plan = commit.plan_commit(conn, root)
+    assert plan.has_errors
+    assert any("pending" in e for e in plan.errors)
+
+
+def test_plan_commit_deterministic(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    for name in ("a.jpg", "b.jpg"):
+        pid = conn.execute("SELECT id FROM photos WHERE path LIKE ?", (f"%{name}",)).fetchone()[0]
+        conn.execute(
+            "UPDATE group_states SET status='completed' WHERE group_id=("
+            "SELECT group_id FROM groups WHERE photo_id=?)", (pid,)
+        )
+    conn.commit()
+
+    p1 = commit.plan_commit(conn, root)
+    p2 = commit.plan_commit(conn, root)
+    assert [(m.src_path, m.dst_path, m.role) for m in p1.moves] == \
+           [(m.src_path, m.dst_path, m.role) for m in p2.moves]
+
+
+def test_plan_commit_numbers_per_day(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(1), root / "b.jpg", "2026:10:15 14:32:05", quality=85)
+    save(make_scene(1), root / "c.jpg", "2026:10:15 14:32:10", quality=80)
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    aid = conn.execute("SELECT id FROM photos WHERE path LIKE '%a.jpg'").fetchone()[0]
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=?", (aid,))
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    nnn = sorted(int(m.dst_path.stem.split("_")[-1]) for m in plan.moves if m.photo_id)
+    assert nnn == [1, 2, 3]
+
+
+def test_plan_commit_respects_existing_files(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    aid = conn.execute("SELECT id FROM photos").fetchone()[0]
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=?", (aid,))
+    conn.commit()
+
+    existing = root / "_curator" / "winner" / "20261015_100000_001.JPG"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"fake")
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    assert len(plan.moves) == 1
+    assert plan.moves[0].dst_path.name == "20261015_143200_002.jpg"
+
+
+def test_plan_commit_includes_live_photo_companion(tmp_path):
+    from curator import commit, db
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (100, 100), (200, 100, 50)).save(root / "IMG_0001.HEIC")
+    (root / "IMG_0001.MOV").write_bytes(b"fake video data")
+
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO photos (path, size, mtime, taken_at, taken_source, time_known, "
+        "sha256, phash, sharpness, scanned_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (str(root / "IMG_0001.HEIC"), 100, 0.0, "2026-10-15T14:32:00",
+         "exif_original", 1, "abc", "0" * 16, 100.0, "2026-10-15T00:00:00"),
+    )
+    pid = conn.execute("SELECT id FROM photos").fetchone()[0]
+    conn.execute("INSERT INTO groups (photo_id, group_id, run_id) VALUES (?, 1, 'r1')", (pid,))
+    conn.execute(
+        "INSERT INTO group_states (group_id, status, current_winner_photo_id, updated_at) "
+        "VALUES (1, 'completed', ?, '2026-10-15T00:00:00')", (pid,),
+    )
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    assert not plan.errors
+    assert len(plan.moves) == 2
+    still = next(m for m in plan.moves if m.photo_id is not None)
+    mov = next(m for m in plan.moves if m.companion_of is not None)
+    assert still.dst_path.suffix == ".HEIC"
+    assert mov.dst_path.suffix == ".MOV"
+    assert still.dst_path.stem == mov.dst_path.stem
+    assert plan.stats["companion"] == 1
+
+
+def test_preview_endpoint_no_disk_writes(tmp_path):
+    import os
+    from curator import db as dbmod
+    from curator import group, scan
+    from curator.web.app import create_app
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    aid = conn.execute("SELECT id FROM photos").fetchone()[0]
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=?", (aid,))
+    conn.commit()
+    conn.close()
+
+    conn2 = dbmod.connect(tmp_path / "t.db")
+    conn2.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_folder', ?)", (str(root),))
+    conn2.commit()
+    conn2.close()
+
+    mtime_before = os.stat(root / "a.jpg").st_mtime
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    r = app.test_client().post("/api/commit/preview")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["stats"]["total_moves"] >= 1
+    assert os.stat(root / "a.jpg").st_mtime == mtime_before
+    assert not (root / "_curator").exists()

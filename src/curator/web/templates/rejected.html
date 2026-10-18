@@ -32,8 +32,14 @@
                 <div class="empty-state__icon" aria-hidden="true">✓</div>
                 <div class="empty-state__title">All rejected photos reviewed</div>
                 <div class="empty-state__hint">
-                    <span x-text="reviewedCount"></span> photos were reviewed.
-                    The commit flow (step 5) is coming next.
+                    <span x-text="reviewedCount"></span> photos were reviewed. Ready to commit.
+                </div>
+                <div style="display: flex; gap: var(--space-3); margin-top: var(--space-4);">
+                    <a href="/confirm" class="btn btn--primary" style="width: auto; text-decoration: none;">
+                        <span>Continue to confirm</span>
+                        <kbd>→</kbd>
+                    </a>
+                    <a href="/" class="btn btn--ghost" style="width: auto; text-decoration: none;">Back to groups</a>
                 </div>
                 <a href="/" class="btn btn--ghost" style="width: auto; margin-top: var(--space-4);">Back to groups</a>
             </div>

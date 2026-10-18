@@ -650,6 +650,38 @@ def api_rejected_accept_all():
     return jsonify({"ok": True, "count": cur.rowcount})
 
 
+# ---- Confirm (commit preview) -------------------------------------------------------
+
+@bp.route("/confirm")
+def confirm():
+    if current_app.config["USE_FIXTURES"]:
+        return redirect(url_for("web.index"))
+    source_root = _load_setting(current_app.config["DB_PATH"], "last_folder") or ""
+    curator_root = str(Path(source_root) / "_curator") if source_root else ""
+    return render_template(
+        "confirm.html",
+        source_root=source_root,
+        curator_root=curator_root,
+    )
+
+
+@bp.route("/api/commit/preview", methods=["POST"])
+def api_commit_preview():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"stats": {}, "errors": [], "sample": [], "has_errors": False})
+    from curator import commit as commitmod
+
+    source_root_str = _load_setting(current_app.config["DB_PATH"], "last_folder")
+    if not source_root_str:
+        return jsonify({"error": "No source folder. Run intake first."}), 400
+    source_root = Path(source_root_str)
+    if not source_root.is_dir():
+        return jsonify({"error": f"Source folder not found: {source_root}"}), 400
+
+    plan = commitmod.plan_commit(get_db(), source_root)
+    return jsonify(commitmod.plan_to_dict(plan))
+
+
 # ---- Photos -------------------------------------------------------------------------
 
 @bp.route("/photos/<int:photo_id>/thumb")
