@@ -6,8 +6,7 @@
     "stats": {{ stats | tojson }}
 }
 </script>
-
-<div x-data="doneApp()" class="centered-page">
+<div x-data="doneApp()" @keydown.window="onKey($event)" class="centered-page">
     <div class="centered-card centered-card--wide">
         <div class="done-hero">
             <div class="done-hero__check" aria-hidden="true">✓</div>
@@ -31,8 +30,14 @@
         </dl>
 
         <div class="done-actions">
-            <button type="button" class="btn btn--primary" @click="openFolder()">
-                <span>Open folder</span>
+            <a href="/intake" class="btn btn--primary" style="text-decoration: none; justify-content: center;">
+                <span>Start over</span>
+                <kbd>N</kbd>
+            </a>
+        </div>
+        <div class="done-actions-secondary">
+            <button type="button" class="btn btn--ghost" @click="openFolder()">
+                Open folder
             </button>
             <button type="button" class="btn btn--danger" @click="undoEverything()" :disabled="undoing">
                 <span x-text="undoing ? 'Restoring…' : 'Undo everything'"></span>

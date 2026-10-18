@@ -293,7 +293,7 @@ kbd {
 .detail__img {
     width: 100%;
     aspect-ratio: 4 / 3;
-    object-fit: cover;
+    object-fit: contain;
     border-radius: var(--radius-lg);
     background: var(--bg-raised);
     animation: preview-in var(--dur-slow) var(--ease-out);
@@ -1122,4 +1122,24 @@ body.is-dragging-column * {
 .done-footer__mono {
     font-family: var(--font-mono);
     color: var(--text-secondary);
+}
+
+.intake-notice {
+    background: rgba(48, 209, 88, 0.06);
+    border: 1px solid rgba(48, 209, 88, 0.20);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    margin-bottom: var(--space-6);
+}
+.intake-notice__title {
+    color: var(--status-complete);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: var(--space-2);
+}
+.intake-notice__body {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
 }

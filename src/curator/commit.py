@@ -327,6 +327,11 @@ def execute_commit(plan: CommitPlan, conn, progress=None) -> dict:
                     [(now, pid) for pid in photo_ids],
                 )
             conn.commit()
+            try:
+                from .learning import store_reject_centroids
+                store_reject_centroids(conn, commit_id)
+            except Exception:
+                pass  # learning is best-effort; never block a successful commit
         except Exception:
             conn.rollback()
             raise

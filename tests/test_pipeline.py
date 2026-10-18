@@ -1001,3 +1001,251 @@ def test_commit_endpoint_async(tmp_path):
     # Verify done page reachable
     r = client.get("/done")
     assert r.status_code == 200
+
+
+# ---- Step 6a: smart grouping --------------------------------------------------------
+
+def test_smart_grouping_merges_burst(tmp_path):
+    """Two photos 2s apart with cosine 0.70 must merge (burst threshold 0.65)."""
+    from curator import db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 14:32:02")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    # Force embeddings that give cosine 0.70
+    v1 = np.array([1.0, 0.0] + [0.0] * 382, dtype=np.float32)
+    v2 = np.array([0.70, 0.71] + [0.0] * 382, dtype=np.float32)  # normalized: |v| ≈ 1
+    v2 = v2 / np.linalg.norm(v2)
+    embeddings.save_embedding(conn, pids["a.jpg"], "test", v1)
+    embeddings.save_embedding(conn, pids["b.jpg"], "test", v2)
+    conn.commit()
+
+    group.build_groups(conn, method="smart", model="test")
+    g = {Path(r["path"]).name: r["group_id"] for r in conn.execute(
+        "SELECT p.path, g.group_id FROM groups g JOIN photos p ON p.id = g.photo_id")}
+    assert g["a.jpg"] == g["b.jpg"]
+
+
+def test_smart_grouping_keeps_distant_apart(tmp_path):
+    """Two photos 5 minutes apart with cosine 0.70 must NOT merge (threshold 0.85)."""
+    from curator import db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 14:37:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    v1 = np.array([1.0, 0.0] + [0.0] * 382, dtype=np.float32)
+    v2 = np.array([0.70, 0.71] + [0.0] * 382, dtype=np.float32)
+    v2 = v2 / np.linalg.norm(v2)
+    embeddings.save_embedding(conn, pids["a.jpg"], "test", v1)
+    embeddings.save_embedding(conn, pids["b.jpg"], "test", v2)
+    conn.commit()
+
+    group.build_groups(conn, method="smart", model="test")
+    g = {Path(r["path"]).name: r["group_id"] for r in conn.execute(
+        "SELECT p.path, g.group_id FROM groups g JOIN photos p ON p.id = g.photo_id")}
+    assert g["a.jpg"] != g["b.jpg"]
+
+
+def test_smart_grouping_requires_embeddings(tmp_path):
+    from curator import db, group, scan
+    import pytest
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    with pytest.raises(ValueError, match="no embeddings"):
+        group.build_groups(conn, method="smart", model="missing-model")
+
+
+# ---- Step 6b: reject learning -------------------------------------------------------
+
+def test_reject_centroid_stored_at_commit(tmp_path):
+    from curator import commit, db, group, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    for name in ("a.jpg", "b.jpg"):
+        v = np.random.default_rng(pids[name]).standard_normal(384).astype(np.float32)
+        embeddings.save_embedding(conn, pids[name], "dinov2_vits14", v / np.linalg.norm(v))
+    conn.commit()
+
+    gid_a = conn.execute("SELECT group_id FROM groups WHERE photo_id=?", (pids["a.jpg"],)).fetchone()[0]
+    gid_b = conn.execute("SELECT group_id FROM groups WHERE photo_id=?", (pids["b.jpg"],)).fetchone()[0]
+    conn.execute("UPDATE group_states SET status='deleted' WHERE group_id=?", (gid_a,))
+    conn.execute("UPDATE group_states SET status='completed', current_winner_photo_id=? WHERE group_id=?",
+                 (pids["b.jpg"], gid_b))
+    conn.commit()
+
+    plan = commit.plan_commit(conn, root)
+    result = commit.execute_commit(plan, conn)
+
+    examples = conn.execute("SELECT * FROM reject_examples").fetchall()
+    assert len(examples) == 1
+    assert examples[0]["source"] == "group"
+    assert examples[0]["n_photos"] == 1
+    assert examples[0]["commit_id"] == result["commit_id"]
+
+
+def test_flag_similar_to_reject(tmp_path):
+    from curator import db, learning, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "rejected.jpg", "2026:10:15 14:00:00")
+    save(make_scene(2), root / "new.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    # Similar embeddings for rejected and new (cosine ~1.0)
+    v = np.random.default_rng(0).standard_normal(384).astype(np.float32)
+    v /= np.linalg.norm(v)
+    embeddings.save_embedding(conn, pids["rejected.jpg"], "dinov2_vits14", v)
+    embeddings.save_embedding(conn, pids["new.jpg"], "dinov2_vits14", v)
+    conn.commit()
+
+    learning.store_suggested_reject(conn, pids["rejected.jpg"], model="dinov2_vits14")
+    flagged = learning.flag_similar_to_rejects(conn, model="dinov2_vits14", threshold=0.82)
+    assert flagged == 1
+
+    row = conn.execute(
+        "SELECT suggested_reject FROM photos WHERE id=?", (pids["new.jpg"],)
+    ).fetchone()
+    assert row["suggested_reject"] == 1
+
+
+def test_suggested_excluded_from_groups(tmp_path):
+    from curator import db, group, learning, scan
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 14:32:02")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    v = np.random.default_rng(0).standard_normal(384).astype(np.float32)
+    v /= np.linalg.norm(v)
+    for name in ("a.jpg", "b.jpg"):
+        embeddings.save_embedding(conn, pids[name], "dinov2_vits14", v)
+    conn.commit()
+
+    learning.store_suggested_reject(conn, pids["a.jpg"], model="dinov2_vits14")
+    learning.flag_similar_to_rejects(conn, model="dinov2_vits14", threshold=0.82)
+    # b.jpg got flagged, a.jpg is user_reject'd already (from confirm in store_suggested_reject? no)
+    # Actually store_suggested_reject only stores the centroid, doesn't mark user_reject.
+    # Let's check: b.jpg should be suggested_reject=1
+    row = conn.execute("SELECT suggested_reject FROM photos WHERE id=?", (pids["b.jpg"],)).fetchone()
+    assert row["suggested_reject"] == 1
+
+    group.build_groups(conn, method="smart", model="dinov2_vits14")
+    in_groups = {Path(r["path"]).name for r in conn.execute(
+        "SELECT p.path FROM groups g JOIN photos p ON p.id = g.photo_id"
+    )}
+    assert "b.jpg" not in in_groups
+
+
+def test_suggested_endpoints(tmp_path):
+    from curator import db, learning, scan
+    from curator.web.app import create_app
+    root = tmp_path / "photos"; root.mkdir()
+    save(make_scene(1), root / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pids = {Path(r["path"]).name: r["id"] for r in conn.execute("SELECT id, path FROM photos")}
+    v = np.random.default_rng(0).standard_normal(384).astype(np.float32)
+    v /= np.linalg.norm(v)
+    for name in ("a.jpg", "b.jpg"):
+        embeddings.save_embedding(conn, pids[name], "dinov2_vits14", v)
+    conn.commit()
+
+    learning.store_suggested_reject(conn, pids["a.jpg"], model="dinov2_vits14")
+    learning.flag_similar_to_rejects(conn, model="dinov2_vits14", threshold=0.82)
+    conn.close()
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+
+    data = client.get("/api/suggested").get_json()
+    assert len(data["photos"]) == 1
+
+    pid = data["photos"][0]["id"]
+    r = client.post(f"/api/suggested/{pid}/keep")
+    assert r.status_code == 200
+
+    data = client.get("/api/suggested").get_json()
+    assert len(data["photos"]) == 0
+
+
+def test_start_over_flow(tmp_path):
+    """After commit, / redirects to /done. Analyzing a new folder resets state
+    and / shows the new groups."""
+    import time
+    from curator import commit, db, group, scan
+    from curator.web.app import create_app
+    from PIL import Image
+
+    # First batch
+    root1 = tmp_path / "batch1"; root1.mkdir()
+    save(make_scene(1), root1 / "a.jpg", "2026:10:15 14:32:00")
+    save(make_scene(2), root1 / "b.jpg", "2026:10:15 15:00:00")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root1, conn)
+    group.build_groups(conn)
+    conn.execute(
+        "UPDATE group_states SET status='completed', current_winner_photo_id=("
+        "SELECT MIN(photo_id) FROM groups WHERE group_id=group_states.group_id)"
+    )
+    conn.commit()
+    plan = commit.plan_commit(conn, root1)
+    result = commit.execute_commit(plan, conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_folder', ?)",
+        (str(root1),),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('last_commit_id', ?)",
+        (result["commit_id"],),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('review_completed', '1')"
+    )
+    conn.commit()
+    conn.close()
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+
+    # 1. / should redirect to /done
+    r = client.get("/")
+    assert r.status_code in (301, 302, 303, 307, 308)
+    assert "/done" in r.headers["Location"]
+
+    # 2. Verify _curator/ was NOT re-indexed on a fresh scan
+    root1_before = sum(1 for _ in scan.iter_photos(root1))
+    # iter_photos must skip _curator
+    assert root1_before == 0  # all source files were moved
+
+    # 3. Simulate "Start over" with a new folder
+    root2 = tmp_path / "batch2"; root2.mkdir()
+    save(make_scene(3), root2 / "c.jpg", "2026:10:16 10:00:00")
+    save(make_scene(4), root2 / "d.jpg", "2026:10:16 11:00:00")
+
+    r = client.post("/api/analyze", json={"folder": str(root2)})
+    assert r.status_code == 200
+
+    for _ in range(100):
+        status = client.get("/api/analyze/status").get_json()
+        if not status["running"]:
+            break
+        time.sleep(0.1)
+
+    assert status["error"] is None
+
+    # 4. After new analysis, / shows new groups (not /done)
+    r = client.get("/")
+    assert r.status_code == 200  # no redirect — new batch ready to review

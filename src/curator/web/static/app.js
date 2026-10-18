@@ -42,7 +42,9 @@ function curatorApp() {
             // Clamp on window resize so nothing disappears off-screen
             this._resizeHandler = () => this.clampWidths();
             window.addEventListener('resize', this._resizeHandler);
+            
             this.rejectedCount = data.rejectedCount || 0;
+            this.suggestedCount = data.suggestedCount || 0;
         },
 
         /* ---------- Getters ---------- */
@@ -246,7 +248,7 @@ function curatorApp() {
         /* ---------- Lightbox ---------- */
         openLightbox(photoId) {
             const d = this.selectedDetail;
-            if (!d) return;
+            if (!d || !d.photos || !photoId) return;
             const photos = d.photos.map(p => ({ id: p.id, url: p.url }));
             const idx = photos.findIndex(p => p.id === photoId);
             if (idx === -1) return;
@@ -830,5 +832,143 @@ function doneApp() {
             el.classList.add('toast--out');
             setTimeout(() => el.remove(), 200);
         },
+    };
+}
+
+function suggestedApp() {
+    return {
+        photos: [],
+        undoStack: [],
+
+        async load() { await this.refresh(); },
+
+        async refresh() {
+            try {
+                const r = await fetch('/api/suggested');
+                const data = await r.json();
+                this.photos = data.photos || [];
+            } catch {}
+        },
+
+        async keep(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const [photo] = this.photos.splice(idx, 1);
+            try {
+                await fetch(`/api/suggested/${photoId}/keep`, { method: 'POST' });
+                this.pushUndo(() => { this.photos.splice(idx, 0, photo); });
+            } catch {
+                this.photos.splice(idx, 0, photo);
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        async reject(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const [photo] = this.photos.splice(idx, 1);
+            try {
+                await fetch(`/api/suggested/${photoId}/reject`, { method: 'POST' });
+                this.pushUndo(() => { this.photos.splice(idx, 0, photo); });
+            } catch {
+                this.photos.splice(idx, 0, photo);
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        async acceptAll() {
+            if (this.photos.length === 0) return;
+            const snapshot = this.photos.slice();
+            this.photos = [];
+            try {
+                const r = await fetch('/api/suggested/accept-all', { method: 'POST' });
+                const data = await r.json();
+                this.toast(`Rejected ${data.count} photos`, 'Undo', () => this.refresh());
+            } catch {
+                this.photos = snapshot;
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        openLightbox(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const photos = this.photos.map(p => ({ id: p.id, url: p.url }));
+            this.$dispatch('open-lightbox', { photos, index: idx });
+        },
+
+        pushUndo(fn) {
+            this.undoStack.push(fn);
+            if (this.undoStack.length > 50) this.undoStack.shift();
+        },
+
+        onKey(e) {
+            const tag = (e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+                const fn = this.undoStack.pop();
+                if (fn) { fn(); this.toast('Undone', null, null); }
+                e.preventDefault(); return;
+            }
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
+            if (this.photos.length === 0) return;
+            const current = this.photos[0];
+            if (e.key === 'k' || e.key === 'K') { this.keep(current.id); e.preventDefault(); return; }
+            if (e.key === 'x' || e.key === 'X') { this.reject(current.id); e.preventDefault(); return; }
+            if (e.key === 'Enter') { this.acceptAll(); e.preventDefault(); return; }
+        },
+
+        toast(text, actionLabel, onAction) {
+            this.$refs.toasts.querySelectorAll('.toast').forEach(t => this.dismissToast(t));
+            const el = document.createElement('div');
+            el.className = 'toast';
+            const txt = document.createElement('span');
+            txt.className = 'toast__text'; txt.textContent = text;
+            el.appendChild(txt);
+            if (actionLabel) {
+                const btn = document.createElement('button');
+                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
+                btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
+                el.appendChild(btn);
+            }
+            this.$refs.toasts.appendChild(el);
+            el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 1800);
+        },
+        dismissToast(el) {
+            if (!el || !el.parentNode) return;
+            clearTimeout(el._timeout);
+            el.classList.add('toast--out');
+            setTimeout(() => el.remove(), 200);
+        },
+    };
+}
+
+function doneApp() {
+    return {
+        commit_id: null,
+        stats: {},
+        undoing: false,
+
+        init() {
+            const data = JSON.parse(document.getElementById('initial-data').textContent);
+            this.commit_id = data.commit_id;
+            this.stats = data.stats || {};
+        },
+
+        onKey(e) {
+            const tag = (e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key === 'n' || e.key === 'N') {
+                window.location = '/intake';
+                e.preventDefault();
+            }
+        },
+
+        async openFolder() { /* invariato */ },
+        async undoEverything() { /* invariato */ },
+        formatSize(bytes) { /* invariato */ },
+        toast() { /* invariato */ },
+        dismissToast() { /* invariato */ },
     };
 }

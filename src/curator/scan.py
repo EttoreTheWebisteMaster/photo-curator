@@ -75,7 +75,10 @@ def check_root(root: Path) -> None:
 def iter_photos(root: Path):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
-            d for d in dirnames if not d.startswith(".") and not d.endswith(".photoslibrary")
+            d for d in dirnames
+            if not d.startswith(".")
+            and not d.endswith(".photoslibrary")
+            and d != "_curator"   # output of a previous commit: never re-index
         )
         for name in sorted(filenames):
             if name.startswith("."):

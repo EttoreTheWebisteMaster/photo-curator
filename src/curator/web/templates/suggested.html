@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block body %}
+<div x-data="suggestedApp()" x-init="load()" @keydown.window="onKey($event)" class="app app--rejected">
+    <aside class="sidebar">
+        <header class="sidebar__header">
+            <div class="sidebar__label">Similar to past rejects</div>
+            <div x-show="photos.length > 0" class="sidebar__counter">
+                <span class="sidebar__counter-value" x-text="photos.length"></span>
+                <span class="sidebar__counter-label">to review</span>
+            </div>
+            <div x-show="photos.length === 0" class="sidebar__counter">
+                <span class="sidebar__counter-value sidebar__counter-value--done">✓</span>
+                <span class="sidebar__counter-label">all reviewed</span>
+            </div>
+        </header>
+        <div style="padding: var(--space-4); font-size: 12px; color: var(--text-tertiary); line-height: 1.6;">
+            <p style="margin: 0;">
+                The system marked these photos as <strong style="color: var(--text-secondary);">visually similar to groups you've rejected</strong>.
+                Keep the ones you like — they'll rejoin groups next analysis.
+            </p>
+        </div>
+    </aside>
+
+    <main class="main">
+        <template x-if="photos.length === 0">
+            <div class="empty-state">
+                <div class="empty-state__icon" aria-hidden="true">✓</div>
+                <div class="empty-state__title">Nothing suggested</div>
+                <div class="empty-state__hint">The system found no new photos similar to your past rejects.</div>
+                <a href="/" class="btn btn--ghost" style="width: auto; margin-top: var(--space-4); text-decoration: none;">Back to groups</a>
+            </div>
+        </template>
+
+        <template x-if="photos.length > 0">
+            <div class="main__inner">
+                <header class="main__header">
+                    <div>
+                        <div class="main__label">Suggested reject</div>
+                        <div class="main__title" x-text="photos.length + ' photo' + (photos.length === 1 ? '' : 's')"></div>
+                    </div>
+                    <button type="button" class="btn btn--ghost" @click="acceptAll()" style="width: auto;">
+                        Accept all
+                    </button>
+                </header>
+
+                <div class="grid">
+                    <template x-for="photo in photos" :key="photo.id">
+                        <div class="thumb thumb--rejected">
+                            <img class="thumb__img" :src="photo.thumb" alt="" loading="lazy"
+                                 @click="openLightbox(photo.id)" style="cursor: zoom-in;">
+                            <span class="thumb__reason"
+                                  x-text="Math.round(photo.similarity * 100) + '% similar'"></span>
+                            <span class="thumb__meta" style="opacity: 1; position: relative; inset: auto; background: none; backdrop-filter: none; padding: 0;">
+                                <button type="button" class="thumb__action thumb__action--keep"
+                                        @click="keep(photo.id)">
+                                    Keep <kbd>K</kbd>
+                                </button>
+                                <button type="button" class="thumb__action thumb__action--reject"
+                                        @click="reject(photo.id)">
+                                    Reject <kbd>X</kbd>
+                                </button>
+                            </span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </template>
+    </main>
+
+    <aside class="detail">
+        <div class="detail__inner">
+            <header class="detail__header"><div class="detail__label">Shortcuts</div></header>
+            <div style="padding: var(--space-4); font-size: 13px; color: var(--text-secondary); line-height: 1.8;">
+                <div><kbd>K</kbd> Keep — photo rejoins groups</div>
+                <div><kbd>X</kbd> Reject — moves to <code style="font-family: var(--font-mono);">_rejected/</code></div>
+                <div><kbd>⏎</kbd> Accept all visible</div>
+            </div>
+        </div>
+    </aside>
+
+    <div class="toasts" x-ref="toasts" aria-live="polite"></div>
+
+    <div x-data="lightbox()"
+         @open-lightbox.window="show($event.detail.photos, $event.detail.index)"
+         x-show="open" x-transition.opacity.duration.150ms class="lightbox"
+         @keydown.escape.window="close()" @keydown.arrow-right.window="next()"
+         @keydown.arrow-left.window="prev()" @keydown.z.window="zoom = !zoom"
+         style="display: none;">
+        <div class="lightbox__stage" @click="toggleZoom($event)">
+            <img :src="current?.url" :style="`transform: ${transform}`" class="lightbox__img" alt="">
+        </div>
+        <div class="lightbox__chrome">
+            <span class="lightbox__counter" x-text="(index + 1) + ' / ' + photos.length"></span>
+            <button type="button" class="lightbox__close" @click="close()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -6,19 +6,27 @@
         <h1 class="centered-card__title">Review photos</h1>
         <p class="centered-card__subtitle">Everything stays on your Mac. Nothing is moved until you confirm.</p>
 
-        {% if has_groups %}
+        {% if has_groups and pending_count > 0 %}
         <div class="intake-warning">
             <div class="intake-warning__title">
                 You have {{ pending_count }} group{{ 's' if pending_count != 1 else '' }} in progress
             </div>
             <p class="intake-warning__body">
-                Starting a new analysis will reset decisions on every group.
-                Resume the current review, or continue below to start fresh.
+                Starting a new analysis will <strong>discard your current selections</strong>.
+                Continue below to start fresh, or go back to resume.
             </p>
-            <a href="{{ url_for('web.index') }}" class="btn btn--primary" style="width: auto; margin-top: var(--space-3);">
+            <a href="{{ url_for('web.index') }}" class="btn btn--primary" style="width: auto; margin-top: var(--space-3); text-decoration: none;">
                 <span>Resume current review</span>
                 <kbd>⏎</kbd>
             </a>
+        </div>
+        {% elif review_completed %}
+        <div class="intake-notice">
+            <div class="intake-notice__title">Previous batch committed</div>
+            <p class="intake-notice__body">
+                All set for a new batch. Add more photos to the same folder, or pick a different one.
+                <a href="/done" style="color: var(--accent);">View the last commit</a>
+            </p>
         </div>
         {% endif %}
 

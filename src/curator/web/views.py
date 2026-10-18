@@ -17,6 +17,8 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from curator import embeddings as embedmod
+from curator import group as groupmod
 
 from flask import (
     Blueprint, abort, current_app, g, jsonify,
@@ -28,9 +30,11 @@ from .fixtures import get_fake_groups
 from .progress import ProgressEstimator
 from .thumbs import thumb_for
 
+REVIEW_COMPLETED_KEY = "review_completed"
+
 # Bump when the grouping logic or filters change, so previously-analyzed
 # folders get re-grouped on the next `/api/analyze` run even if files are unchanged.
-GROUPING_VERSION = "2"
+GROUPING_VERSION = "3"
 
 bp = Blueprint(
     "web",
@@ -95,7 +99,7 @@ def _analysis_fingerprint(conn) -> str:
         "SELECT id, sha256, mtime FROM photos WHERE error IS NULL ORDER BY id"
     ).fetchall()
     h = hashlib.sha256()
-    h.update(GROUPING_VERSION.encode())          # ← new line
+    h.update(GROUPING_VERSION.encode())
     for r in rows:
         h.update(f"{r['id']}:{r['sha256'] or ''}:{r['mtime']}".encode())
     return h.hexdigest()
@@ -189,35 +193,69 @@ def index():
         )
 
     conn = get_db()
+    db_path = current_app.config["DB_PATH"]
+
+    # 1. Just committed and not undone? Show /done.
+    if _load_setting(db_path, REVIEW_COMPLETED_KEY) == "1":
+        last_commit = _load_setting(db_path, "last_commit_id")
+        if last_commit:
+            active = conn.execute(
+                "SELECT COUNT(*) FROM manifest WHERE commit_id=? AND undone_at IS NULL",
+                (last_commit,),
+            ).fetchone()[0]
+            if active > 0:
+                return redirect(url_for("web.done"))
+        # Commit was undone or manifest removed: clear flag, fall through
+        _save_setting(db_path, REVIEW_COMPLETED_KEY, "0")
+
+    # 2. Normal review flow
     has_groups = conn.execute("SELECT COUNT(*) FROM group_states").fetchone()[0] > 0
-    if not has_groups:
-        total_photos = conn.execute(
-            "SELECT COUNT(*) FROM photos WHERE error IS NULL"
+    if has_groups:
+        groups = _load_group_list(conn)
+        pending = sum(1 for gr in groups if gr["status"] == "pending")
+        first_pending = next((gr for gr in groups if gr["status"] == "pending"),
+                             groups[0] if groups else None)
+        detail = _load_group_detail(conn, first_pending["id"]) if first_pending else None
+
+        rejected_count = conn.execute(
+            "SELECT COUNT(*) FROM photos WHERE error IS NULL "
+            "  AND rejected_reviewed_at IS NULL "
+            "  AND COALESCE(is_utility,0)=1 "
+            "  AND committed_at IS NULL"
         ).fetchone()[0]
-        if total_photos == 0:
-            # Nothing scanned yet: start at intake
-            return redirect(url_for("web.intake"))
-        # Photos exist but none ended up in groups → they were all utility or duplicates.
-        # Send the user to the rejected queue; that is the only thing left to review.
+
+        suggested_count = conn.execute(
+            "SELECT COUNT(*) FROM photo_suggestions ps "
+            "JOIN photos p ON p.id = ps.photo_id "
+            "WHERE ps.dismissed_at IS NULL AND p.error IS NULL "
+            "  AND p.committed_at IS NULL"
+        ).fetchone()[0]
+
+        return render_template(
+            "index.html", groups=groups, pending_count=pending,
+            use_fixtures=False, initial_detail=detail,
+            rejected_count=rejected_count,
+            suggested_count=suggested_count,
+        )
+
+    # 3. No groups: where next?
+    # Nothing scanned yet?
+    total_photos = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND committed_at IS NULL"
+    ).fetchone()[0]
+    if total_photos == 0:
+        return redirect(url_for("web.intake"))
+
+    # Photos exist but no groups: probably all utility → /rejected
+    rejected_left = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND committed_at IS NULL "
+        "  AND rejected_reviewed_at IS NULL AND COALESCE(is_utility,0)=1"
+    ).fetchone()[0]
+    if rejected_left > 0:
         return redirect(url_for("web.rejected"))
 
-    groups = _load_group_list(conn)
-    pending = sum(1 for g in groups if g["status"] == "pending")
-    first_pending = next((g for g in groups if g["status"] == "pending"), groups[0] if groups else None)
-    detail = _load_group_detail(conn, first_pending["id"]) if first_pending else None
-
-    # Hint the review page about the next phase
-    rejected_count = conn.execute(
-        "SELECT COUNT(*) FROM photos WHERE error IS NULL "
-        "  AND rejected_reviewed_at IS NULL "
-        "  AND COALESCE(is_utility,0)=1"
-    ).fetchone()[0]
-
-    return render_template(
-        "index.html", groups=groups, pending_count=pending,
-        use_fixtures=False, initial_detail=detail,
-        rejected_count=rejected_count,
-    )
+    # Fallback: intake
+    return redirect(url_for("web.intake"))
 
 
 @bp.route("/intake")
@@ -226,6 +264,7 @@ def intake():
         return redirect(url_for("web.index"))
     if _state()["running"]:
         return redirect(url_for("web.analysis"))
+
     conn = get_db()
     has_groups = conn.execute("SELECT COUNT(*) FROM group_states").fetchone()[0] > 0
     pending = 0
@@ -233,12 +272,18 @@ def intake():
         pending = conn.execute(
             "SELECT COUNT(*) FROM group_states WHERE status='pending'"
         ).fetchone()[0]
+
+    review_completed = (
+        _load_setting(current_app.config["DB_PATH"], REVIEW_COMPLETED_KEY) == "1"
+    )
     last_folder = _load_setting(current_app.config["DB_PATH"], "last_folder") or ""
+
     return render_template(
         "intake.html",
         has_groups=has_groups,
         pending_count=pending,
         last_folder=last_folder,
+        review_completed=review_completed,
     )
 
 
@@ -263,7 +308,8 @@ def _simulate_analysis(total: int, state: dict, stop: threading.Event) -> dict:
             "folder": "(simulated)",
             "tasks": [
                 {"id": "scan", "label": "Reading metadata and detecting duplicates",
-                 "status": "running", "count": 0, "total": total, "eta_label": "Calibrating…"},
+                "status": "running", "count": 0, "total": 0, "eta_label": "Calibrating…"},
+                {"id": "embed", "label": "Computing visual embeddings", "status": "pending"},
                 {"id": "group", "label": "Grouping similar shots", "status": "pending"},
             ],
             "started_at": time.time(), "finished_at": None,
@@ -301,6 +347,7 @@ def _simulate_analysis(total: int, state: dict, stop: threading.Event) -> dict:
 def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_path: str) -> dict:
     from curator import group as groupmod
     from curator import scan as scanmod
+    from curator import embeddings as embedmod
 
     def run():
         state.clear()
@@ -310,6 +357,7 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
             "tasks": [
                 {"id": "scan", "label": "Reading metadata and detecting duplicates",
                  "status": "running", "count": 0, "total": 0, "eta_label": "Calibrating…"},
+                {"id": "embed", "label": "Computing visual embeddings", "status": "pending"},
                 {"id": "group", "label": "Grouping similar shots", "status": "pending"},
             ],
             "started_at": time.time(), "finished_at": None,
@@ -337,32 +385,81 @@ def _real_analysis(folder_path: Path, state: dict, stop: threading.Event, db_pat
             if stop.is_set():
                 state["tasks"][0]["status"] = "done"
                 state["tasks"][1]["status"] = "pending"
+                state["tasks"][2]["status"] = "pending"
                 state["cancelled"] = True
                 state["final"] = {"mode": "cancelled"}
                 return
 
             state["tasks"][0]["status"] = "done"
+
+            # Task 1: embeddings (optional — torch may not be installed)
             state["tasks"][1]["status"] = "running"
+            embeddings_available = False
+            try:
+                embed_stats = embedmod.embed_folder(
+                    conn, "dinov2_vits14", batch_size=8,
+                    progress=lambda s: state["tasks"][1].update(
+                        summary=f"{s['embedded']} / {s['candidates']} photos"
+                    ),
+                )
+                state["tasks"][1]["status"] = "done"
+                state["tasks"][1]["summary"] = (
+                    f"{embed_stats['embedded']} embedded"
+                    if embed_stats["embedded"] else "already embedded"
+                )
+                embeddings_available = True
+            except ImportError:
+                state["tasks"][1]["status"] = "done"
+                state["tasks"][1]["summary"] = "torch not installed — pHash only"
+            except Exception as exc:
+                state["tasks"][1]["status"] = "error"
+                state["tasks"][1]["summary"] = f"{type(exc).__name__}: {str(exc)[:50]}"
+
+            # Task 2: grouping
+            state["tasks"][2]["status"] = "running"
 
             new_fp = _analysis_fingerprint(conn)
             old_fp = _load_setting(db_path, "grouping_fingerprint")
             has_groups = conn.execute("SELECT COUNT(*) FROM group_states").fetchone()[0] > 0
 
             if new_fp == old_fp and has_groups and not scan_stats["new"]:
-                state["tasks"][1]["status"] = "done"
-                state["tasks"][1]["summary"] = "no changes"
+                state["tasks"][2]["status"] = "done"
+                state["tasks"][2]["summary"] = "no changes"
                 state["final"] = {"mode": "no_changes"}
             else:
-                group_stats = groupmod.build_groups(conn)
+                if embeddings_available:
+                    from curator.learning import flag_similar_to_rejects
+                    flagged = flag_similar_to_rejects(conn, model="dinov2_vits14")
+                else:
+                    flagged = 0
+
+                if embeddings_available:
+                    try:
+                        group_stats = groupmod.build_groups(
+                            conn, method="smart", model="dinov2_vits14"
+                        )
+                        grouping_method = "smart"
+                    except ValueError as exc:
+                        state["tasks"][2]["summary"] = f"fallback: {exc}"
+                        group_stats = groupmod.build_groups(conn, method="phash")
+                        grouping_method = "phash"
+                else:
+                    group_stats = groupmod.build_groups(conn, method="phash")
+                    grouping_method = "phash"
+
                 _save_setting(db_path, "grouping_fingerprint", new_fp)
-                state["tasks"][1]["status"] = "done"
-                state["tasks"][1]["summary"] = f"{group_stats['groups']} groups"
+                state["tasks"][2]["status"] = "done"
+                state["tasks"][2]["summary"] = (
+                    f"{group_stats['groups']} groups ({grouping_method})"
+                )
                 state["final"] = {
                     "mode": "fresh",
                     "photos": scan_stats["new"] + scan_stats["updated"] + scan_stats["skipped"],
                     "new_photos": scan_stats["new"],
                     "groups": group_stats["groups"],
                     "groups_with_multiple": group_stats["groups_with_multiple"],
+                    "suggested": flagged,
+                    "grouping_method": grouping_method,
                 }
         except Exception as exc:
             state["error"] = f"{type(exc).__name__}: {exc}"
@@ -400,6 +497,10 @@ def api_analyze():
 
     db_path = current_app.config["DB_PATH"]
     _save_setting(db_path, "last_folder", str(folder_path))
+
+    db_path = current_app.config["DB_PATH"]
+    _save_setting(db_path, "last_folder", str(folder_path))
+    _save_setting(db_path, REVIEW_COMPLETED_KEY, "0")       # ← nuova riga
     return jsonify(_real_analysis(folder_path, s, _stop(), db_path))
 
 
@@ -740,6 +841,7 @@ def _run_commit(db_path: str, source_root: Path, state: dict) -> None:
 
         result = commitmod.execute_commit(plan, conn, progress=on_progress)
         _save_setting(db_path, "last_commit_id", result["commit_id"])
+        _save_setting(db_path, REVIEW_COMPLETED_KEY, "1")   # ← nuova riga
         state["result"] = result
     except Exception as exc:
         state["error"] = f"{type(exc).__name__}: {exc}"
@@ -765,6 +867,8 @@ def api_commit_undo():
         return jsonify({"error": "no commit to undo"}), 400
     try:
         result = commitmod.undo_commit(get_db(), commit_id)
+        _save_setting(current_app.config["DB_PATH"], REVIEW_COMPLETED_KEY, "0")
+        return jsonify(result)
     except Exception as exc:
         return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
     return jsonify(result)
@@ -809,6 +913,79 @@ def api_open_folder():
         return jsonify({"error": "output folder not found"}), 404
     subprocess.run(["open", str(target)], check=False)
     return jsonify({"ok": True})
+
+
+# ---- Suggested rejects (learning) ---------------------------------------------------
+
+@bp.route("/suggested")
+def suggested():
+    if current_app.config["USE_FIXTURES"]:
+        return redirect(url_for("web.index"))
+    conn = get_db()
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM photo_suggestions ps "
+        "JOIN photos p ON p.id = ps.photo_id "
+        "WHERE ps.dismissed_at IS NULL AND p.error IS NULL"
+    ).fetchone()[0]
+    return render_template("suggested.html", remaining=remaining)
+
+
+@bp.route("/api/suggested")
+def api_suggested():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"photos": [], "total": 0})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT p.id, p.path, ps.similarity "
+        "FROM photo_suggestions ps JOIN photos p ON p.id = ps.photo_id "
+        "WHERE ps.dismissed_at IS NULL AND p.error IS NULL "
+        "ORDER BY ps.similarity DESC"
+    ).fetchall()
+    return jsonify({
+        "photos": [
+            {
+                "id": r["id"],
+                "thumb": _thumb_url(r["id"]),
+                "url": _full_url(r["id"]),
+                "similarity": round(float(r["similarity"]), 3),
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    })
+
+
+@bp.route("/api/suggested/<int:photo_id>/keep", methods=["POST"])
+def api_suggested_keep(photo_id: int):
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True})
+    from curator.learning import dismiss_suggestion
+    if not dismiss_suggestion(get_db(), photo_id):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True, "action": "keep"})
+
+
+@bp.route("/api/suggested/<int:photo_id>/reject", methods=["POST"])
+def api_suggested_reject(photo_id: int):
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True})
+    from curator.learning import confirm_suggestion
+    confirm_suggestion(get_db(), photo_id)
+    return jsonify({"ok": True, "action": "reject"})
+
+
+@bp.route("/api/suggested/accept-all", methods=["POST"])
+def api_suggested_accept_all():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True, "count": 0})
+    from curator.learning import confirm_suggestion
+    conn = get_db()
+    photos = conn.execute(
+        "SELECT photo_id FROM photo_suggestions WHERE dismissed_at IS NULL"
+    ).fetchall()
+    for (pid,) in photos:
+        confirm_suggestion(conn, pid)
+    return jsonify({"ok": True, "count": len(photos)})
 
 
 # ---- Photos -------------------------------------------------------------------------
