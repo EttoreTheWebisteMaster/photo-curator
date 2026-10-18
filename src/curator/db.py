@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS photos (
     time_known    INTEGER,
     phash         TEXT,
     sharpness     REAL,
+    is_utility    INTEGER DEFAULT 0,
+    duplicate_of  INTEGER REFERENCES photos(id),  -- id of the kept original (NULL = not a copy)
+    rejected_reviewed_at TEXT,      
     error         TEXT,
     scanned_at    TEXT NOT NULL
 );
@@ -90,8 +93,20 @@ CREATE INDEX IF NOT EXISTS idx_group_states_status ON group_states(status);
 
 def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(photos)")}
+    added = False
     if "time_known" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN time_known INTEGER")
+        added = True
+    if "is_utility" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN is_utility INTEGER DEFAULT 0")
+        added = True
+    if "duplicate_of" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN duplicate_of INTEGER")
+        added = True
+    if "rejected_reviewed_at" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN rejected_reviewed_at TEXT")
+        added = True
+    if added:
         conn.commit()
 
 

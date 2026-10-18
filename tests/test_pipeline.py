@@ -167,10 +167,13 @@ def test_unknown_time_photos_are_bucketed_by_day(tmp_path):
     root = tmp_path / "wa"
     root.mkdir()
     scene = make_scene(6)
-    # same scene on the same day, modification dates far away from each other and from the day
-    save(scene, root / "IMG-20210909-WA0001.jpg", mtime="2021-12-01T09:00:00")
-    save(scene, root / "IMG-20210909-WA0002.jpg", mtime="2022-01-20T23:00:00")
-    save(scene, root / "IMG-20210910-WA0001.jpg", mtime="2022-01-21T09:00:00")  # next day
+    # Same scene, same day, different quality -> different bytes (no false duplicate),
+    # similar pHash -> grouped together despite unknown time of day.
+    save(scene, root / "IMG-20210909-WA0001.jpg", mtime="2021-12-01T09:00:00", quality=92)
+    save(scene, root / "IMG-20210909-WA0002.jpg", mtime="2022-01-20T23:00:00", quality=85)
+    # Different scene on the next day -> different group. Different content is fine
+    # because the point of the test is day bucketing, not visual similarity.
+    save(make_scene(7), root / "IMG-20210910-WA0001.jpg", mtime="2022-01-21T09:00:00", quality=92)
     conn = db.connect(tmp_path / "t.db")
     scan.scan(root, conn)
     res = group.build_groups(conn)
@@ -268,9 +271,11 @@ def test_embed_folder_with_fake_embedder_is_incremental(tmp_path):
 def test_group_by_embeddings(tmp_path):
     root = tmp_path / "photos"
     root.mkdir()
-    for i in range(3):
-        Image.new("RGB", (64, 48), color=(200, 100, 50 + i)).save(root / f"a{i}.jpg")
-    Image.new("RGB", (64, 48), color=(50, 100, 200)).save(root / "b0.jpg")
+    # Unique seeds → unique bytes → no false duplicate detection.
+    save(make_scene(1), root / "a0.jpg")
+    save(make_scene(2), root / "a1.jpg")
+    save(make_scene(3), root / "a2.jpg")
+    save(make_scene(4), root / "b0.jpg")
 
     conn = db.connect(tmp_path / "t.db")
     scan.scan(root, conn)
@@ -478,3 +483,140 @@ def test_real_analysis_end_to_end(tmp_path):
             break
         time.sleep(0.1)
     assert status["final"]["mode"] == "no_changes"
+
+
+def test_screenshot_name_is_utility(tmp_path):
+    from curator import db, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (1920, 1080), (50, 100, 200)).save(root / "Screenshot 2026-01-01 at 10.00.00.png")
+    Image.new("RGB", (1000, 800), (50, 100, 200)).save(root / "IMG_0001.jpg")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    rows = {Path(r["path"]).name: r for r in conn.execute("SELECT * FROM photos")}
+    assert rows["Screenshot 2026-01-01 at 10.00.00.png"]["is_utility"] == 1
+    assert rows["IMG_0001.jpg"]["is_utility"] == 0
+
+
+def test_extreme_aspect_ratio_is_not_utility(tmp_path):
+    """Panoramas and portrait phone photos have extreme ratios but are real photos."""
+    from curator import db, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (1170, 2532), (50, 100, 200)).save(root / "weird_name.png")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    row = conn.execute("SELECT is_utility FROM photos").fetchone()
+    assert row[0] == 0
+
+
+def test_exact_duplicates_marked(tmp_path):
+    from curator import db, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    img = Image.new("RGB", (200, 150), (10, 20, 30))
+    img.save(root / "a.jpg")
+    img.save(root / "b.jpg")   # exact same bytes
+    img.save(root / "c.jpg")   # exact same bytes
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    rows = {Path(r["path"]).name: r for r in conn.execute("SELECT * FROM photos ORDER BY id")}
+    assert rows["a.jpg"]["duplicate_of"] is None
+    assert rows["b.jpg"]["duplicate_of"] == rows["a.jpg"]["id"]
+    assert rows["c.jpg"]["duplicate_of"] == rows["a.jpg"]["id"]
+
+
+def test_utility_excluded_from_groups(tmp_path):
+    from curator import db, group, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (1000, 800), (10, 20, 30)).save(root / "photo.jpg")
+    Image.new("RGB", (1170, 2532), (50, 100, 200)).save(root / "Screenshot 2026-01-01.png")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+    grouped = conn.execute(
+        "SELECT p.path FROM groups g JOIN photos p ON p.id = g.photo_id"
+    ).fetchall()
+    names = {Path(r["path"]).name for r in grouped}
+    assert "photo.jpg" in names
+    assert "Screenshot 2026-01-01.png" not in names
+
+
+def test_rejected_keep_promotes_photo(tmp_path):
+    from curator import db, group, scan
+    from curator.web.app import create_app
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (1170, 2532), (50, 100, 200)).save(root / "Screenshot 2026-01-01.png")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    pid = conn.execute("SELECT id FROM photos").fetchone()[0]
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+
+    # Verify it shows in rejected
+    data = client.get("/api/rejected").get_json()
+    assert data["total"] == 1 and len(data["photos"]) == 1
+
+    # Keep it
+    r = client.post(f"/api/rejected/{pid}/keep")
+    assert r.status_code == 200
+
+    # Now it's not rejected anymore, and is not a duplicate or utility
+    row = conn.execute("SELECT is_utility, duplicate_of, rejected_reviewed_at "
+                       "FROM photos WHERE id = ?", (pid,)).fetchone()
+    assert row["is_utility"] == 0
+    assert row["duplicate_of"] is None
+    assert row["rejected_reviewed_at"] is not None
+
+    data = client.get("/api/rejected").get_json()
+    assert data["total"] == 0 or len(data["photos"]) == 0
+
+
+def test_rejected_accept_all(tmp_path):
+    from curator import db, scan
+    from curator.web.app import create_app
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    Image.new("RGB", (1170, 2532), (50, 100, 200)).save(root / "Screenshot A.png")
+    Image.new("RGB", (1170, 2532), (60, 110, 210)).save(root / "Screenshot B.png")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    conn.close()
+
+    app = create_app(db_path=str(tmp_path / "t.db"), use_fixtures=False)
+    client = app.test_client()
+    r = client.post("/api/rejected/accept-all")
+    assert r.status_code == 200
+    assert r.get_json()["count"] == 2
+
+    data = client.get("/api/rejected").get_json()
+    assert len(data["photos"]) == 0
+    assert data["reviewed"] == 2
+
+
+def test_exact_duplicates_are_grouped_together(tmp_path):
+    """Byte-identical copies stay in the same group so the user can review them
+    side-by-side. `duplicate_of` is still populated (for step 5), it just does
+    not exclude the photo from grouping."""
+    from curator import db, group, scan
+    from PIL import Image
+    root = tmp_path / "photos"; root.mkdir()
+    img = Image.new("RGB", (200, 150), (10, 20, 30))
+    img.save(root / "a.jpg")
+    img.save(root / "b.jpg")
+    conn = db.connect(tmp_path / "t.db")
+    scan.scan(root, conn)
+    group.build_groups(conn)
+
+    # duplicate_of is still computed
+    rows = {Path(r["path"]).name: r for r in conn.execute("SELECT * FROM photos")}
+    assert rows["b.jpg"]["duplicate_of"] == rows["a.jpg"]["id"]
+
+    # …but both appear in groups
+    in_groups = {Path(r["path"]).name for r in conn.execute(
+        "SELECT p.path FROM groups g JOIN photos p ON p.id = g.photo_id"
+    )}
+    assert in_groups == {"a.jpg", "b.jpg"}

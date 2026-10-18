@@ -11,6 +11,7 @@ function curatorApp() {
         sidebarWidth: 272,
         detailWidth: 340,
         _resizeHandler: null,
+        rejectedCount: 0,
 
         async init() {
             const data = JSON.parse(document.getElementById('initial-data').textContent);
@@ -41,6 +42,7 @@ function curatorApp() {
             // Clamp on window resize so nothing disappears off-screen
             this._resizeHandler = () => this.clampWidths();
             window.addEventListener('resize', this._resizeHandler);
+            this.rejectedCount = data.rejectedCount || 0;
         },
 
         /* ---------- Getters ---------- */
@@ -495,6 +497,150 @@ function analysisApp() {
                 else if (t.status === 'running' && t.total > 0) sum += t.count / t.total;
             }
             return Math.round((sum / tasks.length) * 100);
+        },
+    };
+}
+
+function rejectedApp() {
+    return {
+        photos: [],
+        reviewedCount: 0,
+        totalCount: 0,
+        undoStack: [],
+
+        async load() {
+            await this.refresh();
+        },
+
+        async refresh() {
+            try {
+                const r = await fetch('/api/rejected');
+                const data = await r.json();
+                this.photos = data.photos;
+                this.reviewedCount = data.reviewed;
+                this.totalCount = data.total;
+            } catch {}
+        },
+
+        get reviewProgressPct() {
+            if (this.totalCount === 0) return 0;
+            return Math.round((this.reviewedCount / this.totalCount) * 100);
+        },
+
+        async keep(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const photo = this.photos[idx];
+            this.photos.splice(idx, 1);
+            this.reviewedCount++;
+            try {
+                await fetch(`/api/rejected/${photoId}/keep`, { method: 'POST' });
+                this.pushUndo(() => {
+                    this.photos.splice(idx, 0, photo);
+                    this.reviewedCount--;
+                });
+            } catch {
+                this.photos.splice(idx, 0, photo);
+                this.reviewedCount--;
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        async reject(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const photo = this.photos[idx];
+            this.photos.splice(idx, 1);
+            this.reviewedCount++;
+            try {
+                await fetch(`/api/rejected/${photoId}/reject`, { method: 'POST' });
+                this.pushUndo(() => {
+                    this.photos.splice(idx, 0, photo);
+                    this.reviewedCount--;
+                });
+            } catch {
+                this.photos.splice(idx, 0, photo);
+                this.reviewedCount--;
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        async acceptAll() {
+            const snapshot = this.photos.slice();
+            if (snapshot.length === 0) return;
+            this.photos = [];
+            this.reviewedCount += snapshot.length;
+            try {
+                const r = await fetch('/api/rejected/accept-all', { method: 'POST' });
+                const data = await r.json();
+                this.pushUndo(async () => {
+                    // Restore by hitting the reject endpoint inverted; here we just reload
+                    // because bulk undo needs a dedicated endpoint. Reload is honest.
+                    await this.refresh();
+                });
+                this.toast(`Accepted ${data.count} rejected photos`, 'Undo', () => this.refresh());
+            } catch {
+                this.photos = snapshot;
+                this.reviewedCount -= snapshot.length;
+                this.toast('Could not save', null, null);
+            }
+        },
+
+        openLightbox(photoId) {
+            const idx = this.photos.findIndex(p => p.id === photoId);
+            if (idx === -1) return;
+            const photos = this.photos.map(p => ({ id: p.id, url: p.url }));
+            this.$dispatch('open-lightbox', { photos, index: idx });
+        },
+
+        pushUndo(fn) {
+            this.undoStack.push(fn);
+            if (this.undoStack.length > 50) this.undoStack.shift();
+        },
+        async undo() {
+            const fn = this.undoStack.pop();
+            if (!fn) return;
+            await fn();
+            this.toast('Undone', null, null);
+        },
+
+        onKey(e) {
+            const tag = (e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+                this.undo(); e.preventDefault(); return;
+            }
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
+            if (this.photos.length === 0) return;
+
+            // First photo in list is the "current" one for keyboard actions
+            const current = this.photos[0];
+            if (e.key === 'k' || e.key === 'K') { this.keep(current.id); e.preventDefault(); return; }
+            if (e.key === 'x' || e.key === 'X') { this.reject(current.id); e.preventDefault(); return; }
+            if (e.key === 'Enter') { this.acceptAll(); e.preventDefault(); return; }
+        },
+
+        toast(text, actionLabel, onAction) {
+            this.$refs.toasts.querySelectorAll('.toast').forEach(t => this.dismissToast(t));
+            const el = document.createElement('div');
+            el.className = 'toast';
+            const txt = document.createElement('span');
+            txt.className = 'toast__text'; txt.textContent = text;
+            el.appendChild(txt);
+            if (actionLabel) {
+                const btn = document.createElement('button');
+                btn.type = 'button'; btn.className = 'toast__action'; btn.textContent = actionLabel;
+                btn.onclick = () => { if (onAction) onAction(); this.dismissToast(el); };
+                el.appendChild(btn);
+            }
+            this.$refs.toasts.appendChild(el);
+            el._timeout = setTimeout(() => this.dismissToast(el), actionLabel ? 5000 : 1800);
+        },
+        dismissToast(el) {
+            if (!el || !el.parentNode) return;
+            clearTimeout(el._timeout);
+            el.classList.add('toast--out');
+            setTimeout(() => el.remove(), 200);
         },
     };
 }

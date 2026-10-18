@@ -28,6 +28,10 @@ from .fixtures import get_fake_groups
 from .progress import ProgressEstimator
 from .thumbs import thumb_for
 
+# Bump when the grouping logic or filters change, so previously-analyzed
+# folders get re-grouped on the next `/api/analyze` run even if files are unchanged.
+GROUPING_VERSION = "2"
+
 bp = Blueprint(
     "web",
     __name__,
@@ -91,6 +95,7 @@ def _analysis_fingerprint(conn) -> str:
         "SELECT id, sha256, mtime FROM photos WHERE error IS NULL ORDER BY id"
     ).fetchall()
     h = hashlib.sha256()
+    h.update(GROUPING_VERSION.encode())          # ← new line
     for r in rows:
         h.update(f"{r['id']}:{r['sha256'] or ''}:{r['mtime']}".encode())
     return h.hexdigest()
@@ -186,14 +191,32 @@ def index():
     conn = get_db()
     has_groups = conn.execute("SELECT COUNT(*) FROM group_states").fetchone()[0] > 0
     if not has_groups:
-        return redirect(url_for("web.intake"))
+        total_photos = conn.execute(
+            "SELECT COUNT(*) FROM photos WHERE error IS NULL"
+        ).fetchone()[0]
+        if total_photos == 0:
+            # Nothing scanned yet: start at intake
+            return redirect(url_for("web.intake"))
+        # Photos exist but none ended up in groups → they were all utility or duplicates.
+        # Send the user to the rejected queue; that is the only thing left to review.
+        return redirect(url_for("web.rejected"))
+
     groups = _load_group_list(conn)
-    pending = sum(1 for gr in groups if gr["status"] == "pending")
-    first_pending = next((gr for gr in groups if gr["status"] == "pending"), groups[0] if groups else None)
+    pending = sum(1 for g in groups if g["status"] == "pending")
+    first_pending = next((g for g in groups if g["status"] == "pending"), groups[0] if groups else None)
     detail = _load_group_detail(conn, first_pending["id"]) if first_pending else None
+
+    # Hint the review page about the next phase
+    rejected_count = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE error IS NULL "
+        "  AND rejected_reviewed_at IS NULL "
+        "  AND COALESCE(is_utility,0)=1"
+    ).fetchone()[0]
+
     return render_template(
         "index.html", groups=groups, pending_count=pending,
         use_fixtures=False, initial_detail=detail,
+        rejected_count=rejected_count,
     )
 
 
@@ -525,6 +548,106 @@ def api_restore(group_id: int):
     conn.execute("DELETE FROM labels WHERE group_id = ? AND label = 'winner'", (group_id,))
     conn.commit()
     return jsonify({"ok": True, "group_id": group_id, "status": "pending"})
+
+
+# ---- Rejected recovery --------------------------------------------------------------
+
+
+def _load_rejected(conn, unreviewed_only: bool = True) -> list[dict]:
+    where = "p.error IS NULL AND COALESCE(p.is_utility,0)=1"
+    if unreviewed_only:
+        where += " AND p.rejected_reviewed_at IS NULL"
+    rows = conn.execute(
+        f"SELECT p.* FROM photos p WHERE {where} ORDER BY p.id"
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "thumb": _thumb_url(r["id"]),
+            "url": _full_url(r["id"]),
+            "reason": "Screenshot or document",
+            "reason_detail": None,
+            "taken_at": r["taken_at"],
+        }
+        for r in rows
+    ]
+
+
+@bp.route("/rejected")
+def rejected():
+    if current_app.config["USE_FIXTURES"]:
+        return redirect(url_for("web.index"))
+
+    conn = get_db()
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND rejected_reviewed_at IS NULL "
+        "  AND COALESCE(is_utility,0)=1"
+    ).fetchone()[0]
+    return render_template("rejected.html", remaining=remaining)
+
+
+@bp.route("/api/rejected")
+def api_rejected():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"photos": [], "reviewed": 0, "total": 0})
+    conn = get_db()
+    photos = _load_rejected(conn, unreviewed_only=True)
+    reviewed = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE rejected_reviewed_at IS NOT NULL"
+    ).fetchone()[0]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE error IS NULL AND COALESCE(is_utility,0)=1"
+    ).fetchone()[0]
+    return jsonify({"photos": photos, "reviewed": reviewed, "total": total})
+
+
+@bp.route("/api/rejected/<int:photo_id>/keep", methods=["POST"])
+def api_rejected_keep(photo_id: int):
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True})
+    conn = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        "UPDATE photos SET is_utility = 0, duplicate_of = NULL, "
+        "rejected_reviewed_at = ? WHERE id = ?",
+        (now, photo_id),
+    )
+    if cur.rowcount == 0:
+        return jsonify({"error": "not found"}), 404
+    conn.commit()
+    return jsonify({"ok": True, "photo_id": photo_id, "action": "keep"})
+
+
+@bp.route("/api/rejected/<int:photo_id>/reject", methods=["POST"])
+def api_rejected_reject(photo_id: int):
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True})
+    conn = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        "UPDATE photos SET rejected_reviewed_at = ? WHERE id = ?",
+        (now, photo_id),
+    )
+    if cur.rowcount == 0:
+        return jsonify({"error": "not found"}), 404
+    conn.commit()
+    return jsonify({"ok": True, "photo_id": photo_id, "action": "reject"})
+
+
+@bp.route("/api/rejected/accept-all", methods=["POST"])
+def api_rejected_accept_all():
+    if current_app.config["USE_FIXTURES"]:
+        return jsonify({"ok": True, "count": 0})
+    conn = get_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        "UPDATE photos SET rejected_reviewed_at = ? "
+        "WHERE error IS NULL AND rejected_reviewed_at IS NULL "
+        "  AND COALESCE(is_utility,0)=1",
+        (now,),
+    )
+    conn.commit()
+    return jsonify({"ok": True, "count": cur.rowcount})
 
 
 # ---- Photos -------------------------------------------------------------------------

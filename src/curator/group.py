@@ -47,6 +47,7 @@ def compute_assignments(conn, *, session_gap_min: float = 30.0,
     rows = conn.execute(
         "SELECT id, taken_at, phash, COALESCE(time_known, 0) AS time_known FROM photos "
         "WHERE error IS NULL AND taken_at IS NOT NULL "
+        "  AND COALESCE(is_utility, 0) = 0 "
         "ORDER BY taken_at, id"
     ).fetchall()
     n = len(rows)

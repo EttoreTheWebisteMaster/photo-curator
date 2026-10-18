@@ -22,6 +22,13 @@ import re
 from datetime import date, datetime, time
 from pathlib import Path
 
+import re as _re
+
+_SCREENSHOT_NAME = _re.compile(
+    r"^(screenshot|screen shot|schermata|capture d.écran|bildschirmfoto)",
+    _re.IGNORECASE,
+)
+
 import imagehash
 import numpy as np
 from PIL import Image, ImageOps
@@ -150,11 +157,28 @@ def laplacian_variance(gray: np.ndarray) -> float:
     return float(lap.var())
 
 
+def detect_utility(path: Path, img: Image.Image) -> bool:
+    """Heuristic: utility = file name clearly indicates a screenshot.
+
+    Why not aspect ratio? Panoramic photos (often 4:1) and portrait phone photos
+    (9:19.5) have extreme ratios but are real photographs. An aspect-ratio
+    heuristic here flags them incorrectly and silently removes them from
+    groups — a much worse UX than letting an occasional unnamed screenshot
+    slip through (it will still be clustered by pHash, and the user can
+    promote it from /rejected if desired).
+
+    Step 4 of the project pipeline will replace this with Apple Vision's
+    'utility' flag, which is content-based rather than name/geometry-based.
+    """
+    return bool(_SCREENSHOT_NAME.match(path.name))
+
+
 def analyse(path: Path, mtime: float) -> dict:
     with Image.open(path) as img:
         taken_at, source, time_known = read_taken_at(img, mtime, path.name)
-        img = ImageOps.exif_transpose(img)  # honour the EXIF orientation
+        img = ImageOps.exif_transpose(img)
         width, height = img.size
+        is_utility = 1 if detect_utility(path, img) else 0
         img = img.convert("RGB")
         img.thumbnail((ANALYSIS_MAX_SIDE, ANALYSIS_MAX_SIDE))
         gray = np.asarray(img.convert("L"))
@@ -166,6 +190,7 @@ def analyse(path: Path, mtime: float) -> dict:
             "time_known": int(time_known),
             "phash": str(imagehash.phash(img)),
             "sharpness": laplacian_variance(gray),
+            "is_utility": is_utility,
         }
 
 
@@ -220,4 +245,38 @@ def scan(root: Path, conn, progress=None, force: bool = False, stop_event=None) 
         if progress:
             progress(stats)
     conn.commit()
+    _mark_exact_duplicates(conn)
     return stats
+
+def _mark_exact_duplicates(conn) -> None:
+    """Mark all but the first photo of each SHA-256 group as duplicates.
+
+    Deterministic: the lowest photo id wins (earliest indexed). Idempotent: re-running
+    produces the same result, which is what makes incremental scans safe.
+    """
+    conn.execute(
+        """
+        UPDATE photos
+        SET duplicate_of = (
+            SELECT MIN(p2.id) FROM photos p2
+            WHERE p2.sha256 = photos.sha256
+              AND p2.sha256 IS NOT NULL
+              AND p2.id < photos.id
+        )
+        WHERE sha256 IS NOT NULL
+          AND id > (
+              SELECT MIN(p2.id) FROM photos p2
+              WHERE p2.sha256 = photos.sha256
+          )
+        """
+    )
+    # Photos that are the "first" of their group must not be marked as duplicates
+    conn.execute(
+        """
+        UPDATE photos SET duplicate_of = NULL
+        WHERE id IN (
+            SELECT MIN(id) FROM photos WHERE sha256 IS NOT NULL GROUP BY sha256
+        )
+        """
+    )
+    conn.commit()

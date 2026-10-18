@@ -6,7 +6,8 @@
     "groups": {{ groups | tojson }},
     "pendingCount": {{ pending_count }},
     "useFixtures": {{ use_fixtures | tojson }},
-    "initialDetail": {{ initial_detail | tojson }}
+    "initialDetail": {{ initial_detail | tojson }},
+    "rejectedCount": {{ rejected_count if rejected_count is defined else 0 }}
 }
 </script>
 
@@ -142,11 +143,20 @@
                 <dl class="impact__grid">
                     <div><dt>Kept</dt><dd x-text="groups.filter(g => g.status === 'completed').length"></dd></div>
                     <div><dt>Deleted</dt><dd x-text="groups.filter(g => g.status === 'deleted').length"></dd></div>
-                    <div><dt>Total groups</dt><dd x-text="groups.length"></dd></div>
+                    <div><dt>Total</dt><dd x-text="groups.length"></dd></div>
                 </dl>
                 <p class="impact__note">
                     Rejected photos are still on disk. Nothing has been moved yet.
                 </p>
+                <div style="display: flex; gap: var(--space-3); margin-top: var(--space-4);">
+                    <a href="/rejected" x-show="rejectedCount > 0" class="btn btn--primary" style="width: auto;">
+                        <span x-text="'Review ' + rejectedCount + ' rejected photo' + (rejectedCount === 1 ? '' : 's')"></span>
+                        <kbd>→</kbd>
+                    </a>
+                    <span x-show="rejectedCount === 0" style="color: var(--text-tertiary); font-size: 12px; align-self: center;">
+                        No rejected photos to review. Ready to commit (step 5).
+                    </span>
+                </div>
             </div>
         </template>
     </main>
