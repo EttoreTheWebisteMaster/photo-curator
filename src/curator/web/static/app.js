@@ -399,3 +399,102 @@ function lightbox() {
         },
     };
 }
+
+function intakeApp() {
+    return {
+        folder: '',
+        dragOver: false,
+        picking: false,
+        submitting: false,
+        error: '',
+
+        async pickFolder() {
+            this.picking = true;
+            this.error = '';
+            try {
+                const r = await fetch('/api/pick-folder', { method: 'POST' });
+                const data = await r.json();
+                if (data.path) this.folder = data.path;
+                else if (data.error) this.error = data.error;
+            } catch (e) {
+                this.error = 'Could not open the folder picker.';
+            } finally {
+                this.picking = false;
+            }
+        },
+
+        onDrop(e) {
+            this.dragOver = false;
+            const dt = e.dataTransfer;
+            if (!dt) return;
+            // Browsers do not expose the absolute path of dropped folders for security.
+            // Provide the native picker instead and explain why.
+            this.error = 'For privacy, browsers hide dropped folder paths. Use "Choose folder" instead.';
+        },
+
+        async analyze() {
+            if (!this.folder || this.submitting) return;
+            this.submitting = true;
+            this.error = '';
+            try {
+                const r = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder: this.folder }),
+                });
+                const data = await r.json();
+                if (!r.ok) {
+                    this.error = data.error || `HTTP ${r.status}`;
+                    return;
+                }
+                window.location.href = '/analysis';
+            } catch (e) {
+                this.error = 'Could not start analysis.';
+            } finally {
+                this.submitting = false;
+            }
+        },
+    };
+}
+
+function analysisApp() {
+    return {
+        state: { running: false, folder: '', tasks: [], final: null, error: null },
+        timer: null,
+
+        start() {
+            this.poll();
+            this.timer = setInterval(() => this.poll(), 500);
+        },
+
+        async poll() {
+            try {
+                const r = await fetch('/api/analyze/status');
+                this.state = await r.json();
+            } catch {}
+            if (!this.state.running && this.state.finished_at) {
+                clearInterval(this.timer);
+                this.timer = null;
+                if (this.state.final && this.state.final.mode !== 'cancelled') {
+                    // Auto-advance after a moment so the user sees the ✓ marks.
+                    setTimeout(() => { window.location.href = '/'; }, 1200);
+                }
+            }
+        },
+
+        async cancel() {
+            await fetch('/api/analyze/cancel', { method: 'POST' });
+        },
+
+        get overallPercent() {
+            const tasks = this.state.tasks || [];
+            if (tasks.length === 0) return 0;
+            let sum = 0;
+            for (const t of tasks) {
+                if (t.status === 'done') sum += 1;
+                else if (t.status === 'running' && t.total > 0) sum += t.count / t.total;
+            }
+            return Math.round((sum / tasks.length) * 100);
+        },
+    };
+}

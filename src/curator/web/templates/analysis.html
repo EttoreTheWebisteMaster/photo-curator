@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block body %}
+<div x-data="analysisApp()" x-init="start()" class="centered-page">
+    <div class="centered-card">
+        <div class="centered-card__brand">Analyzing</div>
+        <h1 class="centered-card__title" x-text="state.folder || 'Preparing…'"></h1>
+
+        <ul class="checklist">
+            <template x-for="task in state.tasks" :key="task.id">
+                <li class="checklist-item" :class="'checklist-item--' + task.status">
+                    <span class="checklist-item__icon" aria-hidden="true">
+                        <template x-if="task.status === 'done'">✓</template>
+                        <template x-if="task.status === 'running'"></template>
+                        <template x-if="task.status === 'pending'">○</template>
+                        <template x-if="task.status === 'error'">✕</template>
+                    </span>
+                    <span class="checklist-item__body">
+                        <span class="checklist-item__label" x-text="task.label"></span>
+                        <span class="checklist-item__meta">
+                            <template x-if="task.id === 'scan' && task.total > 0">
+                                <span x-text="task.count + ' / ' + task.total + ' · ' + task.eta_label"></span>
+                            </template>
+                            <template x-if="task.summary">
+                                <span x-text="task.summary"></span>
+                            </template>
+                        </span>
+                    </span>
+                </li>
+            </template>
+        </ul>
+
+        <div class="analysis-progress">
+            <div class="analysis-progress__bar" :style="`width: ${overallPercent}%`"></div>
+        </div>
+
+        <p class="analysis-error" x-show="state.error" x-text="state.error"></p>
+
+        <div class="analysis-actions">
+            <button type="button"
+                    class="btn btn--ghost"
+                    @click="cancel()"
+                    x-show="state.running">
+                Cancel
+            </button>
+            <a href="{{ url_for('web.index') }}"
+               class="btn btn--primary"
+               x-show="!state.running && state.final"
+               style="width: auto;">
+                <span x-text="state.final?.mode === 'no_changes' ? 'Resume review' : 'Start reviewing'"></span>
+                <kbd>⏎</kbd>
+            </a>
+            <a href="{{ url_for('web.intake') }}"
+               class="btn btn--ghost"
+               x-show="!state.running && !state.final">
+                Back
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -169,7 +169,7 @@ def analyse(path: Path, mtime: float) -> dict:
         }
 
 
-def scan(root: Path, conn, progress=None, force: bool = False) -> dict:
+def scan(root: Path, conn, progress=None, force: bool = False, stop_event=None) -> dict:
     """Index `root`. Incremental: unchanged files (same size + mtime) are skipped.
 
     Rows written by an older version (time_known missing) are re-scanned automatically;
@@ -181,6 +181,8 @@ def scan(root: Path, conn, progress=None, force: bool = False) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
 
     for path in iter_photos(root):
+        if stop_event is not None and stop_event.is_set():
+            break
         stats["seen"] += 1
         st = path.stat()
         row = conn.execute(

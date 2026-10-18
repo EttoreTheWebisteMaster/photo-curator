@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block body %}
+<div x-data="intakeApp()" class="centered-page">
+    <div class="centered-card">
+        <div class="centered-card__brand">photo-curator</div>
+        <h1 class="centered-card__title">Review photos</h1>
+        <p class="centered-card__subtitle">Everything stays on your Mac. Nothing is moved until you confirm.</p>
+
+        {% if has_groups %}
+        <div class="intake-warning">
+            <div class="intake-warning__title">
+                You have {{ pending_count }} group{{ 's' if pending_count != 1 else '' }} in progress
+            </div>
+            <p class="intake-warning__body">
+                Starting a new analysis will reset decisions on every group.
+                Resume the current review, or continue below to start fresh.
+            </p>
+            <a href="{{ url_for('web.index') }}" class="btn btn--primary" style="width: auto; margin-top: var(--space-3);">
+                <span>Resume current review</span>
+                <kbd>⏎</kbd>
+            </a>
+        </div>
+        {% endif %}
+
+        <div class="intake-form">
+            <div class="folder-drop"
+                 :class="dragOver && 'is-hover'"
+                 @dragover.prevent="dragOver = true"
+                 @dragleave.prevent="dragOver = false"
+                 @drop.prevent="onDrop($event)">
+                <div class="folder-drop__icon" aria-hidden="true">⌂</div>
+                <div class="folder-drop__text" x-show="!folder">Drop a folder here</div>
+                <div class="folder-drop__text" x-show="folder">
+                    <span class="folder-drop__path" x-text="folder"></span>
+                </div>
+                <button type="button" class="btn btn--ghost" @click="pickFolder()" :disabled="picking">
+                    <span x-text="picking ? 'Opening…' : 'Choose folder'"></span>
+                </button>
+            </div>
+
+            <div class="intake-form__row">
+                <input type="text"
+                       class="input"
+                       placeholder="or paste a path, e.g. ~/Pictures/sample"
+                       x-model="folder"
+                       @keydown.enter="analyze()">
+            </div>
+
+            {% if last_folder %}
+            <div class="intake-form__recent">
+                Last used: <button type="button" class="link" @click="folder = '{{ last_folder }}'">{{ last_folder }}</button>
+            </div>
+            {% endif %}
+
+            <button type="button"
+                    class="btn btn--primary"
+                    @click="analyze()"
+                    :disabled="!folder || submitting"
+                    style="margin-top: var(--space-5);">
+                <span x-text="submitting ? 'Starting…' : 'Analyze folder'"></span>
+                <kbd>⏎</kbd>
+            </button>
+
+            <p class="intake-form__error" x-show="error" x-text="error"></p>
+        </div>
+    </div>
+</div>
+{% endblock %}
